@@ -53,14 +53,14 @@ static int sum_comm_sort_idx[NTHREADS];
 static int comm_offset, sum_offset;
 static int *comm_start;
 
-static int comm_cmp_func(const void *spd_comm, const void *spd_comm_sort_idx)
+static int comm_cmp_func(const void *a, const void *b)
 {
-	return comm_start[*(int *)spd_comm_sort_idx] - comm_start[*(int *)spd_comm];
+	return comm_start[*(int *)b] - comm_start[*(int *)a];
 }
 
-static int sum_cmp_func(const void *spd_comm, const void *spd_comm_sort_idx)
+static int sum_cmp_func(const void *a, const void *b)
 {
-	return sum_comm[*(int *)spd_comm_sort_idx] - sum_comm[*(int *)spd_comm];
+	return sum_comm[*(int *)b] - sum_comm[*(int *)a];
 }
 
 static void spd_print_comm(int k[][NTHREADS])
@@ -106,16 +106,28 @@ static int sum_arr(int *arr)
 	return ret;
 }
 
-static int now_idx[NTHREADS], threads_chosen[NTHREADS];
+static int threads_chosen[NTHREADS];
 
 static int core_to_thread[NTHREADS];
 
+struct numa_info {
+	int core; // curr core to map thread
+	int leader; // leader thread seq
+};
+
+static inline bool check_neighbor(int seq1, int seq2)
+{
+    return (spd_comm[seq1][seq2] >= spd_comm[seq1][spd_comm_sort_idx[seq1][1]]
+				|| spd_comm[seq1][seq2] >= spd_comm[seq2][spd_comm_sort_idx[seq2][1]])
+				&& spd_comm[seq1][seq2] > spd_comm[seq1][spd_comm_sort_idx[seq1][NTHREADS - 1]]
+				&& spd_comm[seq1][seq2] > spd_comm[seq2][spd_comm_sort_idx[seq2][NTHREADS - 1]];
+}
 
 int init_module(void)
 {
 	int i;
 	int cores_per_node = 8, nnodes = 2;
-	int *now_core = (int *) kmalloc(sizeof(int) * nnodes, GFP_KERNEL);
+	struct numa_info *ni = kmalloc(sizeof(*ni) * nnodes, GFP_KERNEL);
 
 	memset(threads_chosen, -1, NTHREADS * sizeof(int));
 
@@ -137,24 +149,35 @@ int init_module(void)
 			   sum_comm_sort_idx[i], sum_comm[sum_comm_sort_idx[i]]);
 	}
 
-	for (i = 0; i < nnodes; ++i) {
-		now_core[i] = cores_per_node - 1;
-		threads_chosen[sum_comm_sort_idx[i]] = now_core[i] + i * cores_per_node;
-		--now_core[i];
+	ni[0].core = cores_per_node - 2;
+	ni[0].leader = sum_comm_sort_idx[0];
+	threads_chosen[ni[0].leader] = cores_per_node - 1;
+
+	for (i = 1; i < nnodes; ++i) {
+		int j = 0;
+		ni[i].core = cores_per_node * (i + 1) - 1;
+
+		while (threads_chosen[sum_comm_sort_idx[j]] != -1
+				|| check_neighbor(sum_comm_sort_idx[j], ni[i - 1].leader))
+			j = (j + 1) % NTHREADS;
+
+		ni[i].leader = sum_comm_sort_idx[j];
+		threads_chosen[ni[i].leader] = ni[i].core;
+		--ni[i].core;
 	}
 	
 	for (i = 0; i < nnodes; ++i) {
-		int curr = sum_comm_sort_idx[i], neighbor;
+		int curr = ni[i].leader, neighbor;
 
-		while (now_core[i] >= 0) {
-			int *idx = &spd_comm_sort_idx[curr][0];
+		while (ni[i].core >= i * cores_per_node) {
+			int *idx = &spd_comm_sort_idx[curr][0], j = 0;
 
-			while (threads_chosen[idx[now_idx[curr]]] != -1)
-				now_idx[curr] = (now_idx[curr] + 1) % NTHREADS;
-			neighbor = idx[now_idx[curr]];
+			while (threads_chosen[idx[j]] != -1)
+				j = (j + 1) % NTHREADS;
+			neighbor = idx[j];
 
-			threads_chosen[neighbor] = now_core[i] + i * cores_per_node;
-			--now_core[i];
+			threads_chosen[neighbor] = ni[i].core;
+			--ni[i].core;
 
 			curr = neighbor;
 		}
@@ -179,7 +202,7 @@ int init_module(void)
 	spd_print_arr(core_to_thread);
 
 	//topo_init();
-	kfree(now_core);
+	kfree(ni);
 
 	return 0;
 }
