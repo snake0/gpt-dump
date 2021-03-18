@@ -160,14 +160,14 @@ void dump_pte(pte_t *pgtable, int level) {
   for (i = 0; i < PTRS_PER_PTE; i++) {
     pte = pgtable[i];
 
-    // if (pte_val(pte)) {
-      // if (pte_present(pte)) {
+    if (pte_val(pte)) {
+      if (pte_present(pte)) {
         for (j = 0; j < level; j++)
           printk(KERN_CONT " ...");
 
         printk(KERN_CONT "%3d: pte " UL_TO_BINARY_PATTERN "\n", i,
                UL_TO_BINARY(pte_val(pte)));
-      // }
-    // }
+      }
+    }
   }
 }
