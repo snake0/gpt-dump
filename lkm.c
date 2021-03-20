@@ -153,7 +153,7 @@ int init_module(void) {
   print_ptr_vaddr(ptr);
   dump_pgd(current->mm->pgd, 1);
   print_pa_check(vaddr);
-  printk("!!! %lu", *ptr);
+  printk("!!! %lu", ++*ptr);
 
   kvm_hypercall2(22, paddr, 0);
   return 0;
