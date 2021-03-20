@@ -148,8 +148,8 @@ int init_module(void) {
   int i;
   pr_err("----------------------- BEGIN ----------------------------");
   
-  ptr = kmalloc(sizeof(int) * 10000, GFP_KERNEL);
-  for (i = 0; i < 10000; ++i)
+  ptr = kmalloc(sizeof(int) * 2000, GFP_KERNEL);
+  for (i = 0; i < 2000; ++i)
     ptr[i] = 1772 + i;
 
   print_ptr_vaddr(ptr);
