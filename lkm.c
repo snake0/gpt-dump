@@ -144,7 +144,7 @@ void dump_pmd(pmd_t *pgtable, int level);
 void dump_pte(pte_t *pgtable, int level);
 
 int init_module(void) {
-  unsigned long *ptr;
+  volatile unsigned long *ptr;
   pr_err("----------------------- BEGIN ----------------------------");
   
   ptr = kmalloc(sizeof(int), GFP_KERNEL);
