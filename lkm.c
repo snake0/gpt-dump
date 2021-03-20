@@ -50,7 +50,7 @@ MODULE_LICENSE("GPL");
   UL_TO_PTE_OFFSET(ulong)
 
 #define UL_TO_PTE(ulong) \
-  UL_TO_PTE_IR(ulong >> 52), UL_TO_PTE_PHYADDR(ulong >> 12), UL_TO_PTE_OFFSET(ulong)
+  UL_TO_PTE_IR(ulong >> 52), UL_TO_PTE_PHYADDR(ulong >> PAGE_SHIFT), UL_TO_PTE_OFFSET(ulong)
 
 
 /* printk pattern strings */
@@ -119,8 +119,8 @@ static void print_pa_check(unsigned long vaddr) {
   unsigned long pfn, offset;
 
   paddr = __pa(vaddr);
-  pfn = paddr >> 12;
-  offset = paddr & ((1 << 12) - 1);
+  pfn = paddr >> PAGE_SHIFT;
+  offset = paddr & ((1 << PAGE_SHIFT) - 1);
 
   // pr_info("... ... ... ...  73: pte 100000000000 0000000000000000000100111011 000001100011");
   pr_info("      Physical Frame Number by __pa() " 
@@ -144,7 +144,7 @@ void dump_pmd(pmd_t *pgtable, int level);
 void dump_pte(pte_t *pgtable, int level);
 
 int init_module(void) {
-  int *ptr;
+  unsigned long *ptr;
   pr_err("----------------------- BEGIN ----------------------------");
   
   ptr = kmalloc(sizeof(int), GFP_KERNEL);
@@ -153,6 +153,7 @@ int init_module(void) {
   print_ptr_vaddr(ptr);
   dump_pgd(current->mm->pgd, 1);
   print_pa_check(vaddr);
+  printk("!!! %lu", *ptr);
 
   kvm_hypercall2(22, paddr, *ptr);
   return 0;
