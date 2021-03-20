@@ -145,10 +145,12 @@ void dump_pte(pte_t *pgtable, int level);
 
 int init_module(void) {
   volatile unsigned long *ptr;
+  int i;
   pr_err("----------------------- BEGIN ----------------------------");
   
-  ptr = kmalloc(sizeof(int), GFP_KERNEL);
-  *ptr = 1771;
+  ptr = kmalloc(sizeof(int) * 100, GFP_KERNEL);
+  for (i = 0; i < 100; ++i)
+    ptr[i] = 1772 + i;
 
   print_ptr_vaddr(ptr);
   dump_pgd(current->mm->pgd, 1);
@@ -156,6 +158,7 @@ int init_module(void) {
   printk("!!! %lu", ++*ptr);
 
   kvm_hypercall2(22, paddr, *ptr);
+  kfree(ptr);
   return 0;
 }
 
