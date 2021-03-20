@@ -127,7 +127,7 @@ static void print_pa_check(unsigned long vaddr) {
     PTE_PHYADDR_PATTREN, UL_TO_PTE_PHYADDR(pfn));
   pr_err("-------------------------------------------------------------------------------");
   // pr_info("VADDR 100101100 010101111 111011110 010010011 ");
-  
+
   pr_info("VADDR [  PGD  ] [  PUD  ] [  PMD  ] [  PTE  ] [  Offset  ]");
   pr_info("VADDR "VADDR_PATTERN"\n", UL_TO_VADDR(vaddr));
   pr_info("                     Offset by __pa()         " 
@@ -154,7 +154,7 @@ int init_module(void) {
   dump_pgd(current->mm->pgd, 1);
   print_pa_check(vaddr);
 
-  kvm_hypercall2(22, paddr, 0);
+  kvm_hypercall2(22, paddr, *ptr);
   return 0;
 }
 
