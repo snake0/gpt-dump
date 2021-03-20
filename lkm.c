@@ -116,14 +116,18 @@ static inline void print_ptr_vaddr(void *ptr) {
 }
 
 static void print_pa_check(unsigned long vaddr) {
-  paddr = __pa(vaddr), 
-    pfn = paddr >> 12,
-    offset = paddr & ((1 << 12) - 1);
+  unsigned long pfn, offset;
+
+  paddr = __pa(vaddr);
+  pfn = paddr >> 12;
+  offset = paddr & ((1 << 12) - 1);
+
   // pr_info("... ... ... ...  73: pte 100000000000 0000000000000000000100111011 000001100011");
   pr_info("      Physical Frame Number by __pa() " 
     PTE_PHYADDR_PATTREN, UL_TO_PTE_PHYADDR(pfn));
   pr_err("-------------------------------------------------------------------------------");
   // pr_info("VADDR 100101100 010101111 111011110 010010011 ");
+  
   pr_info("VADDR [  PGD  ] [  PUD  ] [  PMD  ] [  PTE  ] [  Offset  ]");
   pr_info("VADDR "VADDR_PATTERN"\n", UL_TO_VADDR(vaddr));
   pr_info("                     Offset by __pa()         " 
