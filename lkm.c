@@ -96,7 +96,7 @@ static inline void print_ulong_pte(unsigned long ulong, unsigned long i, int lev
   pr_cont("%3lu: %s " PTE_PATTERN"\n", i, prefix, UL_TO_PTE(ulong));
 }
 
-static inline void print_ptr_vaddr(void *ptr) {
+static inline void print_ptr_vaddr(volatile unsigned long *ptr) {
   unsigned long mask = ((1 << 9) - 1);
 
   vaddr = (unsigned long) ptr;
