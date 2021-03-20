@@ -85,7 +85,7 @@ MODULE_LICENSE("GPL");
   PTE_IR_PATTERN PTE_PHYADDR_PATTREN VADDR_OFFSET_PATTERN
 
 /* static vals */
-unsigned long vaddr, pgd_idx, pud_idx, pmd_idx, pte_idx; 
+unsigned long vaddr, paddr, pgd_idx, pud_idx, pmd_idx, pte_idx; 
 
 /* static inline functions */
 static inline void print_ulong_pte(unsigned long ulong, unsigned long i, int level, char *prefix) {
@@ -116,9 +116,9 @@ static inline void print_ptr_vaddr(void *ptr) {
 }
 
 static void print_pa_check(unsigned long vaddr) {
-  unsigned long pa = __pa(vaddr), 
-    pfn = pa >> 12,
-    offset = pa & ((1 << 12) - 1);
+  paddr = __pa(vaddr), 
+    pfn = paddr >> 12,
+    offset = paddr & ((1 << 12) - 1);
   // pr_info("... ... ... ...  73: pte 100000000000 0000000000000000000100111011 000001100011");
   pr_info("      Physical Frame Number by __pa() " 
     PTE_PHYADDR_PATTREN, UL_TO_PTE_PHYADDR(pfn));
@@ -150,7 +150,7 @@ int init_module(void) {
   dump_pgd(current->mm->pgd, 1);
   print_pa_check(vaddr);
 
-  kvm_hypercall2(22, 0, 0);
+  kvm_hypercall2(22, paddr, 0);
   return 0;
 }
 
