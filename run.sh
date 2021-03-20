@@ -6,3 +6,4 @@ sudo rmmod lkm
 sudo insmod lkm.ko
 sudo rmmod lkm
 dmesg --notime > ptdump.txt
+sudo dmesg --clear
