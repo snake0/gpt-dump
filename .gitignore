@@ -2,4 +2,8 @@
 *.ko
 *.cmd
 *.mod
-ptdump.txt
+.cache.mk
+Module.symvers
+lkm.mod.c
+lkm.o.ur-safe
+

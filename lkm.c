@@ -10,7 +10,7 @@
 
 #include <asm/pgtable.h>
 #include <asm/uaccess.h>
-
+#include <asm/kvm_para.h>
 MODULE_LICENSE("GPL");
 
 #define RANGE 512
@@ -80,9 +80,9 @@ void dump_pte(pte_t *pgtable, int level);
 
 int init_module(void) {
   printk(KERN_ERR "---------- Hello world 1. ----------\n");
-  dump_pgd(current->mm->pgd, 1);
+  //dump_pgd(current->mm->pgd, 1);
   // dump_pgd(init_level4_pgt, 1);
-
+  kvm_hypercall2(22, 0, 0);
   return 0;
 }
 
