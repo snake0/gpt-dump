@@ -155,7 +155,7 @@ int init_module(void) {
   print_pa_check(vaddr);
   printk("!!! %lu", *ptr);
 
-  kvm_hypercall2(22, paddr);
+  kvm_hypercall2(22, paddr, 0);
   return 0;
 }
 
