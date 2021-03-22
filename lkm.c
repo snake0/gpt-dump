@@ -108,7 +108,7 @@ static inline void print_ulong_pte(unsigned long address, unsigned long ulong,
     pr_cont(PADDR_PATTERN" (From %s) \n", UL_TO_PADDR(address), prefixes[level - 2]);
   
   pr_cont("          +  ");
-  pr_cont(PADDR_PATTERN" * 64 (From %s index)\n", UL_TO_PADDR((i)), PREFIXES[level - 1]);
+  pr_cont(PADDR_PATTERN" * 64 (From %s Idx)\n", UL_TO_PADDR((i)), PREFIXES[level - 1]);
 
   pr_cont(" %3lu: %s " PTE_PATTERN"\n", i, prefixes[level - 1], UL_TO_PTE(ulong));
   pr_err("-----------------------------------------------------------------------------------------\n");
@@ -123,27 +123,27 @@ static inline void print_ptr_vaddr(volatile unsigned long *ptr) {
   pmd_idx = (vaddr >> 21) & mask;
   pte_idx = (vaddr >> 12) & mask;
   pr_info("         %lu       %lu       %lu       %lu", pgd_idx, pud_idx, pmd_idx, pte_idx);
-  pr_info("VADDR [PGD IDX] [PUD IDX] [PMD IDX] [PTE IDX] [  Offset  ]");
+  pr_info("VADDR [PGD Idx] [PUD Idx] [PMD Idx] [PTE Idx] [  Offset  ]");
   pr_info("VADDR "VADDR_PATTERN"\n", UL_TO_VADDR(vaddr));
 }
 
 static inline void print_pa_check(unsigned long vaddr) {
-  unsigned long pfn, offset;
+  // unsigned long pfn, offset;
 
   paddr = __pa(vaddr);
-  pfn = paddr >> PAGE_SHIFT;
-  offset = paddr & ((1 << PAGE_SHIFT) - 1);
+  // pfn = paddr >> PAGE_SHIFT;
+  // offset = paddr & ((1 << PAGE_SHIFT) - 1);
 
   // pr_info("... ... ... ...  73: pte 100000000000 0000000000000000000100111011 000001100011");
-  pr_info("      Physical Frame Number by __pa() " 
-    PTE_PHYADDR_PATTREN, UL_TO_PTE_PHYADDR(pfn));
+  // pr_info("  35: pte 100000000000 0000000000000000000100110101010000100011 000001100011");
+  pr_info("        __pa(vaddr) =  " PADDR_PATTERN "\n", UL_TO_PADDR(paddr));
   // pr_err("-----------------------------------------------------------------------------------------");
   // pr_info("VADDR 100101100 010101111 111011110 010010011 ");
 
   // pr_info("VADDR [  PGD  ] [  PUD  ] [  PMD  ] [  PTE  ] [  Offset  ]");
   // pr_info("VADDR "VADDR_PATTERN"\n", UL_TO_VADDR(vaddr));
-  pr_info("                     Offset by __pa()         \n" 
-    VADDR_OFFSET_PATTERN, UL_TO_PTE_OFFSET(offset));
+  // pr_info("                     Offset by __pa()         \n" 
+  //   VADDR_OFFSET_PATTERN, UL_TO_PTE_OFFSET(offset));
 }
 
 /* page table walker functions */
@@ -180,8 +180,8 @@ void dump_pgd(pgd_t *pgtable, int level) {
   pr_cont(PADDR_PATTERN "\n", UL_TO_PADDR(__pa(pgtable)));
 
   pr_err("Page Table Printing Format:\n");
-  pr_err(" IDX: LVL [Rsvd./Ign.] [     Physical Frame Number, 40 Bits   ] [   Flags  ]");
-  pr_err(" IDX: LVL [ 12 Bits  ] [ Physical Address is 52-bit Wide for Intel Core i7 ]\n");
+  pr_err(" Idx: Lvl [Rsvd./Ign.] [     Physical Frame Number, 40 Bits   ] [   Flags  ]");
+  pr_err(" Idx: Lvl [ 12 Bits  ] [ Physical Address is 52-bit Wide for Intel Core i7 ]\n");
   pr_err("-----------------------------------------------------------------------------------------\n");
 
   for (i = 0; i < PTRS_PER_PGD; i++) {
