@@ -101,7 +101,7 @@ const char *PREFIXES[] = {"PGD", "PUD", "PMD", "PTE"};
 static inline void print_ulong_pte(unsigned long address, unsigned long ulong, 
                                   unsigned long i, int level) {
   pr_cont(" PhyAddr  =  ");
-  // pr_cont(PADDR_PATTERN "\n", UL_TO_PADDR(address + (i << 6)));
+
   if (level == 1)
     pr_cont(PADDR_PATTERN" (From CR3) \n", UL_TO_PADDR(address));
   else
@@ -122,9 +122,14 @@ static inline void print_ptr_vaddr(volatile unsigned long *ptr) {
   pud_idx = (vaddr >> 30) & mask;
   pmd_idx = (vaddr >> 21) & mask;
   pte_idx = (vaddr >> 12) & mask;
+  pr_info("GPT PGD index: %lu", pgd_idx);
+  pr_info("GPT PUD index: %lu", pud_idx);
+  pr_info("GPT PMD index: %lu", pmd_idx);
+  pr_info("GPT PTE index: %lu", pte_idx);
+
   pr_info("         %lu       %lu       %lu       %lu", pgd_idx, pud_idx, pmd_idx, pte_idx);
-  pr_info("VADDR [PGD Idx] [PUD Idx] [PMD Idx] [PTE Idx] [  Offset  ]");
-  pr_info("VADDR "VADDR_PATTERN"\n", UL_TO_VADDR(vaddr));
+  pr_info("GVA [PGD Idx] [PUD Idx] [PMD Idx] [PTE Idx] [  Offset  ]");
+  pr_info("GVA "VADDR_PATTERN"\n", UL_TO_VADDR(vaddr));
 }
 
 static inline void print_pa_check(unsigned long vaddr) {
