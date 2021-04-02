@@ -158,7 +158,7 @@ int init_module(void) {
   kvm_hypercall2(22, paddr, *ptr);
   kfree((const void *)ptr);
 
-  return -1;
+  return 0;
 }
 
 void cleanup_module(void) {}
