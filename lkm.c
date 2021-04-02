@@ -105,14 +105,14 @@ const char *PREFIXES[] = {"PGD", "PUD", "PMD", "PTE"};
 static inline void pr_pte(unsigned long address, unsigned long pte,
                           unsigned long i, int level) {
     if (level == 1)
-        pr_cont(" GPA      CR3       =  ");
+        pr_cont(" NEXT_LVL_GPA(CR3)  =  ");
     else
-        pr_cont(" GPA  %s           =  ", PREFIXES[level - 2]);
+        pr_cont(" NEXT_LVL_GPA(%s)  =  ", PREFIXES[level - 2]);
     pr_cont(PTE_PHYADDR_PATTREN, UL_TO_PTE_PHYADDR(address >> PAGE_SHIFT));
     pr_cont(" +  64 * %3lu\n", i);
+    pr_sep();
 
     pr_cont(" %3lu: %s " PTE_PATTERN"\n", i, PREFIXES[level - 1], UL_TO_PTE(pte));
-    pr_sep();
 }
 
 static inline void print_ptr_vaddr(volatile unsigned long *ptr) {
@@ -155,11 +155,11 @@ int init_module(void) {
     for (i = 0; i < 1; ++i)
       ptr[i] = i*i;
     *ptr = 1772333;
+    printk("Value at GVA: %lu", ++*ptr);
 
     print_ptr_vaddr(ptr);
     dump_pgd(current->mm->pgd, 1);
     print_pa_check(vaddr);
-    printk("!!! %lu", ++*ptr);
 
     kvm_hypercall2(22, paddr, *ptr);
     for (i = 0; i < 1; ++i)
