@@ -4,8 +4,8 @@ sudo dmesg --clear
 make
 
 sudo insmod lkm.ko
-dmesg --notime > ptdump.txt
+dmesg --notime > gpt-dump.txt
 sudo dmesg --clear
 
 sudo rmmod lkm.ko
-cat ptdump.txt
+cat gpt-dump.txt
