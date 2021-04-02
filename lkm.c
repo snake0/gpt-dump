@@ -162,6 +162,8 @@ int init_module(void) {
     printk("!!! %lu", ++*ptr);
 
     kvm_hypercall2(22, paddr, *ptr);
+    for (i = 0; i < 2000; ++i)
+      ptr[i] = ptr[i] - 1;
     kfree((const void *) ptr);
 
     return 0;
