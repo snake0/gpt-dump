@@ -105,9 +105,9 @@ const char *PREFIXES[] = {"PGD", "PUD", "PMD", "PTE"};
 static inline void pr_pte(unsigned long address, unsigned long pte,
                           unsigned long i, int level) {
     if (level == 1)
-        pr_cont(" GPA  CR3       =      ");
+        pr_cont(" GPA      CR3       =  ");
     else
-        pr_cont(" GPA  %s       =      ", PREFIXES[level - 2]);
+        pr_cont(" GPA  %s           =  ", PREFIXES[level - 2]);
     pr_cont(PTE_PHYADDR_PATTREN, UL_TO_PTE_PHYADDR(address >> PAGE_SHIFT));
     pr_cont(" +  64 * %3lu\n", i);
 
@@ -151,8 +151,8 @@ int init_module(void) {
     volatile unsigned long *ptr;
     int i;
 
-    ptr = kmalloc(sizeof(int)*2000, GFP_KERNEL);
-    for (i = 0; i < 2000; ++i)
+    ptr = kmalloc(sizeof(int), GFP_KERNEL);
+    for (i = 0; i < 1; ++i)
       ptr[i] = i*i;
     *ptr = 1772333;
 
@@ -162,7 +162,7 @@ int init_module(void) {
     printk("!!! %lu", ++*ptr);
 
     kvm_hypercall2(22, paddr, *ptr);
-    for (i = 0; i < 2000; ++i)
+    for (i = 0; i < 1; ++i)
       ptr[i] = ptr[i] - 1;
     kfree((const void *) ptr);
 
