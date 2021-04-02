@@ -149,8 +149,11 @@ void dump_pte(pte_t *pgtable, int level);
 
 int init_module(void) {
     volatile unsigned long *ptr;
+    int i;
 
-    ptr = kmalloc(sizeof(int), GFP_KERNEL);
+    ptr = kmalloc(sizeof(int)*2000, GFP_KERNEL);
+    for (i = 0; i < 2000; ++i)
+      ptr[i] = i*i;
     *ptr = 1772333;
 
     print_ptr_vaddr(ptr);
