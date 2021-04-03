@@ -161,7 +161,7 @@ int init_module(void) {
     dump_pgd(current->mm->pgd, 1);
     print_pa_check(vaddr);
 
-    kvm_hypercall2(22, paddr, *ptr);
+    kvm_hypercall1(22, paddr);
     for (i = 0; i < 1; ++i)
       ptr[i] = ptr[i] - 1;
     kfree((const void *) ptr);
@@ -183,9 +183,9 @@ void dump_pgd(pgd_t *pgtable, int level) {
         if (pgd_val(pgd)) {
             if (i == pgd_idx) {
                 if (pgd_large(pgd)) {
-                    pr_info("!!!!!!!!!pgd");
+                    pr_info("Large pgd detected! return"); break;
                 }
-                if (pgd_present(pgd) && !pgd_large(pgd)) {
+                if (pgd_present(pgd)) {
 
                     pr_pte(__pa(pgtable), pgd_val(pgd), i, level);
 
@@ -206,7 +206,7 @@ void dump_pud(pud_t *pgtable, int level) {
         if (pud_val(pud)) {
             if (i == pud_idx) {
                 if (pud_large(pud)) {
-                    pr_info("!!!!!!!!!pud");
+                    pr_info("Large pud detected! return"); break;
                 }
                 if (pud_present(pud) && !pud_large(pud)) {
 
@@ -230,7 +230,7 @@ void dump_pmd(pmd_t *pgtable, int level) {
             if (i == pmd_idx) {
 
                 if (pmd_large(pmd)) {
-                    pr_info("!!!!!!!!!pmd");
+                    pr_info("Large pmd detected! return"); break;
                 }
                 if (pmd_present(pmd) && !pmd_large(pmd)) {
                     pr_pte(__pa(pgtable), pmd_val(pmd), i, level);
