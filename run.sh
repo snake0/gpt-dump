@@ -1,8 +1,11 @@
 #!/bin/bash
 clear
 sudo dmesg --clear
-make 
-sudo rmmod lkm
+make
+
 sudo insmod lkm.ko
-sudo rmmod lkm
-dmesg --notime > ptdump.txt
+dmesg --notime > gpt-dump.txt
+sudo dmesg --clear
+
+sudo rmmod lkm.ko
+cat gpt-dump.txt
