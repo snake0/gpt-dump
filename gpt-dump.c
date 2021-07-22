@@ -148,25 +148,26 @@ void dump_pmd(pmd_t *pgtable, int level);
 void dump_pte(pte_t *pgtable, int level);
 
 int init_module(void) {
-    volatile unsigned long *ptr;
-    int i;
+    // volatile unsigned long *ptr;
+    // int i;
 
-    ptr = kmalloc(sizeof(int), GFP_KERNEL);
-    for (i = 0; i < 1; ++i)
-      ptr[i] = i*i;
-    *ptr = 1772333;
-    printk("Value at GVA: %lu", ++*ptr);
+    // ptr = kmalloc(sizeof(int), GFP_KERNEL);
+    // for (i = 0; i < 1; ++i)
+    //   ptr[i] = i*i;
+    // *ptr = 1772333;
+    // printk("Value at GVA: %lu", ++*ptr);
 
-    print_ptr_vaddr(ptr);
-    dump_pgd(current->mm->pgd, 1);
-    print_pa_check(vaddr);
+    // print_ptr_vaddr(ptr);
+    // dump_pgd(current->mm->pgd, 1);
+    // print_pa_check(vaddr);
 
-    kvm_hypercall1(22, paddr);
-    for (i = 0; i < 1; ++i)
-      ptr[i] = ptr[i] - 1;
-    kfree((const void *) ptr);
+    // kvm_hypercall1(22, paddr);
+    // for (i = 0; i < 1; ++i)
+    //   ptr[i] = ptr[i] - 1;
+    // kfree((const void *) ptr);
+    printk(KERN_ERR "ddddd\n");
 
-    return -1;
+    return 0;
 }
 
 void cleanup_module(void) {}
