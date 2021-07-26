@@ -1,8 +1,8 @@
 #include "clique.h"
 
-struct process_info *process_list = NULL;
-int alloc_processes = 0;
-atomic_t nprocesses = ATOMIC_INIT(0);
+struct c_thread_info thread_list[1UL << PID_HASH_BITS];
+struct process_info process_list;
+
 
 int *cpu_state = NULL;
 int threads_chosen[NTHREADS];
@@ -46,37 +46,54 @@ int default_matrix[NTHREADS * NTHREADS] = {
 };
 
 void init_clique(void) {
-
+    INIT_LIST_HEAD(&process_list.list);
+    process_list.comm[0] = '\0';
+    memset(thread_list, 0, sizeof(thread_list));
 }
 
 void exit_clique(void) {
-    
+    // we do cleanup here
+    struct process_info *pi;
+	struct list_head *curr, *q;
+    list_for_each_safe(curr, q, &process_list.list) {
+        pi = list_entry(curr, struct process_info, list);
+        printk(KERN_ERR "Process %s exit", pi->comm);
+        kfree(pi->pids);
+        kfree(pi->matrix);
+        list_del(&pi->list);
+        kfree(pi);
+    }
 }
 
-void init_process_list(void) {
-    process_list = (struct process_info *) kmalloc(sizeof(struct process_info) * NPROCESS, GFP_KERNEL);
-    alloc_processes = NPROCESS;
-    C_ASSERT(process_list != NULL);
-}
-
-void destroy_process_list(void) {
-    kfree(process_list);
-    process_list = NULL;
-    alloc_processes = 0;
+static inline
+void set_affinity(struct process_info *pi, int tid, int core) {
+    struct cpumask mask;
+    C_ASSERT(pi != NULL);
+    cpumask_clear(&mask);
+    cpumask_set_cpu(core, &mask);
+    sched_setaffinity(pi->pids[tid], &mask);
 }
 
 #ifdef C_PRINT
 
 static void print_matrix(int *k, int size) {
     int i, j;
-    printk(KERN_ERR "======[ matrix ]======\n");
+    printk(KERN_ERR "------[ matrix ]------\n");
     for (i = 0; i < size; ++i) {
         for (j = 0; j < size; ++j) {
             printk(KERN_CONT "%2d ", k[i * size + j]);
         }
         printk(KERN_CONT "\n");
     }
-    printk(KERN_ERR "======[ matrix ]======\n");
+}
+
+static void print_array(int *k, int size) {
+    int i;
+    printk(KERN_ERR "------[ array ]------\n");
+    for (i = 0; i < size; ++i) {
+        printk(KERN_CONT "%2d ", k[i]);
+    }
+    printk(KERN_CONT "\n");
 }
 
 static void print_clique_sizes(void) {
@@ -129,6 +146,26 @@ void print_cliques(void) {
         r = print_clique(cliques + i);
         if (r == 0) {
             printk(KERN_CONT"\n");
+        }
+    }
+}
+
+void print_processes(void) {
+    struct process_info *pi;
+	struct list_head *curr;
+    int n;
+
+    list_for_each(curr, &process_list.list) {
+        pi = list_entry(curr, struct process_info, list);
+        printk(KERN_ERR "print_processes: Process %s", pi->comm);
+        n = atomic_read(&pi->nthreads);
+        if (n) {
+            printk(KERN_ERR "print_processes: Threads of %s", pi->comm);
+            print_array(pi->pids, n);
+            // printk(KERN_ERR "Matrix of %s", pi->comm);
+            // print_matrix(pi->matrix, n);
+        } else {
+            printk(KERN_ERR "print_processes: Empty process %s", pi->comm);
         }
     }
 }
@@ -300,6 +337,22 @@ void clique_analysis(void) {
 
 
 int init_module(void) {
+    init_clique();
+    insert_process("stress-ng", 1112);
+    insert_thread("stress-ng", 1113);
+    insert_thread("stress-ng", 1114);
+    insert_thread("stress-ng", 1116);
+    insert_thread("stress-ng", 1117);
+    insert_thread("stress-ng", 1118);
+    insert_process("sysbench", 1120);
+    insert_thread("sysbench", 1121);
+    insert_thread("sysbench", 1122);
+    insert_process("apple", 1123);
+    remove_thread("apple", 1111);
+    remove_thread("apple", 1123);
+
+    print_processes();
+    exit_clique();
     return 0;
 }
 
