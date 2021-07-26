@@ -1,4 +1,21 @@
 #include "clique.h"
+#include <linux/cpu.h>
+#include <linux/kthread.h>
+#include <linux/delay.h>
+#include <linux/smp.h>
+
+#define for_each_sibling(s, cpu) \
+    for_each_cpu(s, cpu_sibling_mask(cpu))
+#define for_each_core(s, cpu) \
+    for_each_cpu(s, cpu_core_mask(cpu))
+#define for_each_node_cpu(s, node) \
+    for_each_cpu(s, cpumask_of_node(node))
+
+// static int num_nodes = 0, num_cpus = 0, 
+//     num_cores = 0, num_threads = 0,
+//     cores_per_node;
+
+static int num_nodes = 2, cores_per_node = 8;
 
 struct c_thread_info thread_list[1UL << PID_HASH_BITS];
 struct process_info process_list;
@@ -6,7 +23,7 @@ struct process_info process_list;
 
 int *cpu_state = NULL;
 int threads_chosen[NTHREADS];
-int num_nodes = 2, cliques_size, cores_per_node = 8;
+int cliques_size;
 static struct clique cliques[NTHREADS];
 
 // communication rates between threads
@@ -45,33 +62,58 @@ int default_matrix[NTHREADS * NTHREADS] = {
     11, 0,  1,  1,  0,  0,  0,  0,  0, 0,  0,  0,  0,  0,  0, 0,  0,  0,  0, 0, 0, 0, 0,  0,  2,  0,  0,  1,  1,  2,  13, 0
 };
 
-void init_clique(void) {
+// Processor topology
+static void detect_topology(void) {
+  int node, cpu, core, thread;
+  if (num_nodes)
+    return;
+
+  for_each_online_node(node) {
+    ++num_nodes;
+    for_each_node_cpu(cpu, node) {
+      ++num_cpus;
+      for_each_core(core, cpu) {
+        ++num_cores;
+        for_each_sibling(thread, core) {
+          ++num_threads;
+        }
+      }
+    }
+  }
+#ifdef C_PRINT
+  printk(KERN_INFO
+           "topology: %d nodes, %d cpus, %d cores, %d threads",
+           num_nodes, num_cpus, num_cores, num_threads);
+#endif
+  cores_per_node = num_threads / num_nodes;
+}
+
+void init_scheduler(void) {
+    // detect_topology();
     INIT_LIST_HEAD(&process_list.list);
     process_list.comm[0] = '\0';
     memset(thread_list, 0, sizeof(thread_list));
 }
 
-void exit_clique(void) {
+void exit_scheduler(void) {
     // we do cleanup here
     struct process_info *pi;
 	struct list_head *curr, *q;
     list_for_each_safe(curr, q, &process_list.list) {
         pi = list_entry(curr, struct process_info, list);
         printk(KERN_ERR "Process %s exit", pi->comm);
-        kfree(pi->pids);
-        kfree(pi->matrix);
+        vfree(pi->mcs);
         list_del(&pi->list);
         kfree(pi);
     }
 }
 
 static inline
-void set_affinity(struct process_info *pi, int tid, int core) {
+void set_affinity(int pid, int core) {
     struct cpumask mask;
-    C_ASSERT(pi != NULL);
     cpumask_clear(&mask);
     cpumask_set_cpu(core, &mask);
-    sched_setaffinity(pi->pids[tid], &mask);
+    sched_setaffinity(pid, &mask);
 }
 
 #ifdef C_PRINT
@@ -81,7 +123,7 @@ static void print_matrix(int *k, int size) {
     printk(KERN_ERR "------[ matrix ]------\n");
     for (i = 0; i < size; ++i) {
         for (j = 0; j < size; ++j) {
-            printk(KERN_CONT "%2d ", k[i * size + j]);
+            printk(KERN_CONT "%2d ", k[SUBSCRIPT(i, j)]);
         }
         printk(KERN_CONT "\n");
     }
@@ -155,6 +197,7 @@ void print_processes(void) {
 	struct list_head *curr;
     int n;
 
+    printk(KERN_ERR "print_processes: start");
     list_for_each(curr, &process_list.list) {
         pi = list_entry(curr, struct process_info, list);
         printk(KERN_ERR "print_processes: Process %s", pi->comm);
@@ -168,24 +211,25 @@ void print_processes(void) {
             printk(KERN_ERR "print_processes: Empty process %s", pi->comm);
         }
     }
+    printk(KERN_ERR "print_processes: end");
 }
 
 #endif // C_PRINT
 
-int clique_distance(struct clique *c1, struct clique *c2, int *matrix, int size) {
+int clique_distance(struct clique *c1, struct clique *c2, int *matrix) {
     int ret = 0, i, j;
     if (c1 && c2) {
 #ifndef C_USEMAX
         for (i = 0; i < c1->size; ++i) {
             for (j = 0; j < c2->size; ++j) {
-                ret += matrix[c1->pids[i] * size + c2->pids[j]];
+                ret += matrix[SUBSCRIPT(c1->pids[i], c2->pids[j])];
             }
         }
 #else
         for (i = 0; i < c1->size; ++i) {
             for (j = 0; j < c2->size; ++j) {
-                if (ret < matrix[c1->pids[i] * size + c2->pids[j]]) {
-                    ret = matrix[c1->pids[i] * size + c2->pids[j]];
+                if (ret < matrix[SUBSCRIPT(c1->pids[i], c2->pids[j])]) {
+                    ret = matrix[SUBSCRIPT(c1->pids[i], c2->pids[j])];
                 }
             }
         }
@@ -244,7 +288,7 @@ struct clique *find_neighbor(struct clique *c1) {
     int distance = -1, temp_int;
     while (temp < cliques + NTHREADS) {
         if (temp != c1 && temp->flag == C_VALID) {
-            temp_int = clique_distance(c1, temp, default_matrix, NTHREADS);
+            temp_int = clique_distance(c1, temp, default_matrix);
             if (temp_int > distance) {
                 distance = temp_int;
                 c2 = temp;
@@ -277,12 +321,7 @@ void init_cliques(void) {
 }
 
 void init_matrix(int *matrix) {
-    int i, j;
-    for (i = 0; i < NTHREADS; ++i) {
-        for (j = 0; j < NTHREADS; ++j) {
-            matrix[i * NTHREADS + j] = default_matrix[i * NTHREADS + j];
-        }
-    }
+    memcpy(matrix, default_matrix, sizeof(default_matrix));
 }
 
 void assign_cpus_for_clique(struct clique *c, int node) {
@@ -337,22 +376,31 @@ void clique_analysis(void) {
 
 
 int init_module(void) {
-    init_clique();
+    init_scheduler();
     insert_process("stress-ng", 1112);
     insert_thread("stress-ng", 1113);
     insert_thread("stress-ng", 1114);
-    insert_thread("stress-ng", 1116);
-    insert_thread("stress-ng", 1117);
-    insert_thread("stress-ng", 1118);
+
+    print_processes();
+
     insert_process("sysbench", 1120);
     insert_thread("sysbench", 1121);
     insert_thread("sysbench", 1122);
-    insert_process("apple", 1123);
-    remove_thread("apple", 1111);
-    remove_thread("apple", 1123);
 
     print_processes();
-    exit_clique();
+
+    remove_thread("sysbench", 1120);
+    remove_thread("sysbench", 1121);
+    remove_thread("sysbench", 1122);
+
+    print_processes();
+
+    insert_process("sysbench", 1120);
+    insert_thread("sysbench", 1121);
+    insert_thread("sysbench", 1122);
+
+    print_processes();
+    exit_scheduler();
     return 0;
 }
 
