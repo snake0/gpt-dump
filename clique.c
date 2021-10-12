@@ -3,13 +3,8 @@
 #include <linux/kthread.h>
 #include <linux/delay.h>
 #include <linux/smp.h>
+#include <linux/jhash.h>
 
-#define for_each_sibling(s, cpu) \
-    for_each_cpu(s, cpu_sibling_mask(cpu))
-#define for_each_core(s, cpu) \
-    for_each_cpu(s, cpu_core_mask(cpu))
-#define for_each_node_cpu(s, node) \
-    for_each_cpu(s, cpumask_of_node(node))
 
 // static int num_nodes = 0, num_cpus = 0, 
 //     num_cores = 0, num_threads = 0,
@@ -63,30 +58,30 @@ int default_matrix[NTHREADS * NTHREADS] = {
 };
 
 // Processor topology
-static void detect_topology(void) {
-  int node, cpu, core, thread;
-  if (num_nodes)
-    return;
+// static void detect_topology(void) {
+//   int node, cpu, core, thread;
+//   if (num_nodes)
+//     return;
 
-  for_each_online_node(node) {
-    ++num_nodes;
-    for_each_node_cpu(cpu, node) {
-      ++num_cpus;
-      for_each_core(core, cpu) {
-        ++num_cores;
-        for_each_sibling(thread, core) {
-          ++num_threads;
-        }
-      }
-    }
-  }
-#ifdef C_PRINT
-  printk(KERN_INFO
-           "topology: %d nodes, %d cpus, %d cores, %d threads",
-           num_nodes, num_cpus, num_cores, num_threads);
-#endif
-  cores_per_node = num_threads / num_nodes;
-}
+//   for_each_online_node(node) {
+//     ++num_nodes;
+//     for_each_node_cpu(cpu, node) {
+//       ++num_cpus;
+//       for_each_core(core, cpu) {
+//         ++num_cores;
+//         for_each_sibling(thread, core) {
+//           ++num_threads;
+//         }
+//       }
+//     }
+//   }
+// #ifdef C_PRINT
+//   printk(KERN_INFO
+//            "topology: %d nodes, %d cpus, %d cores, %d threads",
+//            num_nodes, num_cpus, num_cores, num_threads);
+// #endif
+//   cores_per_node = num_threads / num_nodes;*/
+// }
 
 void init_scheduler(void) {
     // detect_topology();
@@ -102,7 +97,7 @@ void exit_scheduler(void) {
     list_for_each_safe(curr, q, &process_list.list) {
         pi = list_entry(curr, struct process_info, list);
         printk(KERN_ERR "Process %s exit", pi->comm);
-        vfree(pi->mcs);
+        // vfree(pi->mcs);
         list_del(&pi->list);
         kfree(pi);
     }
@@ -376,31 +371,32 @@ void clique_analysis(void) {
 
 
 int init_module(void) {
-    init_scheduler();
-    insert_process("stress-ng", 1112);
-    insert_thread("stress-ng", 1113);
-    insert_thread("stress-ng", 1114);
+    // init_scheduler();
+    // insert_process("stress-ng", 1112);
+    // insert_thread("stress-ng", 1113);
+    // insert_thread("stress-ng", 1114);
 
-    print_processes();
+    // print_processes();
 
-    insert_process("sysbench", 1120);
-    insert_thread("sysbench", 1121);
-    insert_thread("sysbench", 1122);
+    // insert_process("sysbench", 1120);
+    // insert_thread("sysbench", 1121);
+    // insert_thread("sysbench", 1122);
 
-    print_processes();
+    // print_processes();
 
-    remove_thread("sysbench", 1120);
-    remove_thread("sysbench", 1121);
-    remove_thread("sysbench", 1122);
+    // remove_thread("sysbench", 1120);
+    // remove_thread("sysbench", 1121);
+    // remove_thread("sysbench", 1122);
 
-    print_processes();
+    // print_processes();
 
-    insert_process("sysbench", 1120);
-    insert_thread("sysbench", 1121);
-    insert_thread("sysbench", 1122);
+    // insert_process("sysbench", 1120);
+    // insert_thread("sysbench", 1121);
+    // insert_thread("sysbench", 1122);
 
-    print_processes();
-    exit_scheduler();
+    // print_processes();
+    // exit_scheduler();
+    
     return 0;
 }
 

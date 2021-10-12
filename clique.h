@@ -150,7 +150,7 @@ void insert_process(char *comm, int pid) {
 	thread_list[h].pi = pi;
 	thread_list[h].tid = 0;
 
-	pi->mcs = (struct mem_acc *) vmalloc(sizeof(struct mem_acc) << MEM_HASH_BITS);
+	// pi->mcs = (struct mem_acc *) vmalloc(sizeof(struct mem_acc) << MEM_HASH_BITS);
 	C_ASSERT(pi->mcs);
 	memset(pi->mcs, -1, sizeof(struct mem_acc) << MEM_HASH_BITS);
 }
