@@ -36,6 +36,25 @@ static bool dbg = 1;
 		x, __func__, __LINE__, ##__VA_ARGS__);	\
 } while (0)
 
+////////////////////////////////////////////////////////////////////
+///////////////Connection Management Functions//////////////////////
+////////////////////////////////////////////////////////////////////
+
+/* Allocate cb, freed by caller */
+static int __krdma_create_cb(struct krdma_cb **cbp, enum krdma_role role);
+
+/* Allocate cb->cm_id, freed by caller */
+static int __krdma_bound_dev_remote(struct krdma_cb *cb, const char *host, const char *port);
+static int __krdma_bound_dev_local(struct krdma_cb *cb, const char *host, const char *port);
+
+/* Allocate cb->pd, cb->cq, cb->qp, buffers, freed by caller */
+static int krdma_init_cb(struct krdma_cb *cb);
+
+/* Call rdma_cm, allocate nothing */
+static int __krdma_connect(struct krdma_cb *cb);
+static int __krdma_listen(struct krdma_cb *cb);
+static int __krdma_accept(struct krdma_cb *cb);
+
 static int krdma_set_addr(struct sockaddr_in *addr, const char *host, const char *port) {
 	int ret;
 	long portdec;
@@ -52,25 +71,6 @@ static int krdma_set_addr(struct sockaddr_in *addr, const char *host, const char
 	}
 	addr->sin_addr.s_addr = in_aton(host);
 	addr->sin_port = htons(portdec);
-	return 0;
-}
-
-int krdma_create_cb(struct krdma_cb **cbp, enum krdma_role role)
-{
-	struct krdma_cb *cb;
-
-	cb = kzalloc(sizeof(*cb), GFP_KERNEL);
-	if (!cb)
-		return -ENOMEM;
-	init_completion(&cb->cm_done);
-
-	cb->role = role;
-	if (cb->role == KRDMA_LISTEN_CONN) {
-		INIT_LIST_HEAD(&cb->ready_conn);
-		INIT_LIST_HEAD(&cb->active_conn);
-	}
-
-	*cbp = cb;
 	return 0;
 }
 
@@ -103,13 +103,13 @@ static int krdma_cma_event_handler(struct rdma_cm_id *cm_id,
 		krdma_debug("%s: RDMA_CM_EVENT_CONNECT_REQUEST, cm_id %p\n",
 				__func__, cm_id);
 		/* create a new cb */
-		ret = krdma_create_cb(&conn_cb, KRDMA_ACCEPT_CONN);
+		ret = __krdma_create_cb(&conn_cb, KRDMA_ACCEPT_CONN);
 		if (!ret) {
 			conn_cb->cm_id = cm_id;
 			cm_id->context = conn_cb;
 			list_add_tail(&conn_cb->list, &cb->ready_conn);
 		} else {
-			krdma_err("krdma_create_cb fail, ret %d\n", ret);
+			krdma_err("__krdma_create_cb fail, ret %d\n", ret);
 			cb->state = KRDMA_ERROR;
 		}
 		break;
@@ -140,7 +140,7 @@ static int krdma_cma_event_handler(struct rdma_cm_id *cm_id,
 	return 0;
 }
 
-int krdma_setup_buffers(struct krdma_cb *cb)
+static int krdma_setup_buffers(struct krdma_cb *cb)
 {
 	int i;
 
@@ -211,7 +211,7 @@ out_free_bufs:
 	return -ENOMEM;
 }
 
-int krdma_free_buffers(struct krdma_cb *cb)
+static int krdma_free_buffers(struct krdma_cb *cb)
 {
 	int i;
 
@@ -241,173 +241,30 @@ static int krdma_connect_single(const char *host, const char *port,
 		struct krdma_cb *cb)
 {
 	int ret;
-	struct sockaddr_in addr;
-	struct ib_cq_init_attr cq_attr;
-	struct ib_qp_init_attr qp_init_attr;
-	struct rdma_conn_param conn_param;
 
 	if (host == NULL || port == NULL || cb == NULL)
 		return -EINVAL;
 
-	/* Create cm_id */
-	cb->cm_id = rdma_create_id(&init_net, krdma_cma_event_handler, cb,
-					RDMA_PS_TCP, IB_QPT_RC);
-	if (IS_ERR(cb->cm_id)) {
-		ret = PTR_ERR(cb->cm_id);
-		krdma_err("rdma_create_id error %d\n", ret);
-		goto exit;
-	}
-	krdma_debug("created cm_id %p\n", cb->cm_id);
+	ret = __krdma_bound_dev_remote(cb, host, port);
+	if (ret)
+		return ret;
 
-	/* Resolve address */
-	ret = krdma_set_addr(&addr, host, port);
+	ret = krdma_init_cb(cb);
 	if (ret < 0)
-		goto free_cm_id;
-	ret = rdma_resolve_addr(cb->cm_id, NULL,
-			(struct sockaddr *)&addr, RDMA_RESOLVE_TIMEOUT);
-	if (ret) {
-		krdma_err("rdma_resolve_addr failed, ret %d\n", ret);
-		goto free_cm_id;
-	}
-	wait_for_completion(&cb->cm_done);
-	if (cb->state != KRDMA_ADDR_RESOLVED) {
-		ret = -STATE_ERROR;
-		krdma_err("rdma_resolve_route state error, ret %d\n", ret);
-		goto exit;
-	}
-	krdma_debug("rdma_resolve_addr succeed, device[%s] port_num[%u]\n",
-			cb->cm_id->device->name, cb->cm_id->port_num);
+		goto out_release_cm_id;
 
-	/* Resolve route. */
-	ret = rdma_resolve_route(cb->cm_id, RDMA_RESOLVE_TIMEOUT);
-	if (ret) {
-		krdma_err("rdma_resolve_route failed, ret %d\n", ret);
-		goto free_cm_id;
-	}
-	wait_for_completion(&cb->cm_done);
-	if (cb->state != KRDMA_ROUTE_RESOLVED) {
-		ret = -STATE_ERROR;
-		krdma_err("rdma_resolve_route state error, ret %d\n", ret);
-		goto exit;
-	}
-	krdma_debug("rdma_resolve_route succeed, cm_id %p\n", cb->cm_id);
-
-	/* Create Protection Domain. */
-	cb->pd = ib_alloc_pd(cb->cm_id->device, 0);
-	if (IS_ERR(cb->pd)) {
-		ret = PTR_ERR(cb->pd);
-		krdma_err("ib_alloc_pd failed\n");
-		goto free_cm_id;
-	}
-	krdma_debug("ib_alloc_pd succeed, cm_id %p\n", cb->cm_id);
-
-	/* Create send Completion Queue. */
-	memset(&cq_attr, 0, sizeof(cq_attr));
-	cq_attr.cqe = RDMA_CQ_QUEUE_DEPTH;
-	cq_attr.comp_vector = 0;
-	cb->send_cq = ib_create_cq(cb->cm_id->device, NULL, NULL, cb, &cq_attr);
-	if (IS_ERR(cb->send_cq)) {
-		ret = PTR_ERR(cb->send_cq);
-		krdma_err("ib_create_cq failed, ret%d\n", ret);
-		goto free_pd;
-	}
-
-	/* Create recv Completion Queue. */
-	memset(&cq_attr, 0, sizeof(cq_attr));
-	cq_attr.cqe = RDMA_CQ_QUEUE_DEPTH;
-	cq_attr.comp_vector = 0;
-	cb->recv_cq = ib_create_cq(cb->cm_id->device, NULL, NULL, cb, &cq_attr);
-	if (IS_ERR(cb->recv_cq)) {
-		ret = PTR_ERR(cb->recv_cq);
-		krdma_err("ib_create_cq failed, ret%d\n", ret);
-		goto free_send_cq;
-	}
-
-	krdma_debug("ib_create_cq succeed, cm_id %p\n", cb->cm_id);
-
-	/* Create Queue Pair. */
-	memset(&qp_init_attr, 0, sizeof(qp_init_attr));
-	qp_init_attr.cap.max_send_wr = RDMA_SEND_QUEUE_DEPTH;
-	qp_init_attr.cap.max_recv_wr = RDMA_RECV_QUEUE_DEPTH;
-	qp_init_attr.cap.max_recv_sge = 1;
-	qp_init_attr.cap.max_send_sge = 1;
-	/* Mlx doesn't support inline sends for kernel QPs (yet) */
-	qp_init_attr.cap.max_inline_data = 0;
-	qp_init_attr.qp_type = IB_QPT_RC;
-	qp_init_attr.send_cq = cb->send_cq;
-	qp_init_attr.recv_cq = cb->recv_cq;
-	qp_init_attr.sq_sig_type = IB_SIGNAL_REQ_WR;
-	ret = rdma_create_qp(cb->cm_id, cb->pd, &qp_init_attr);
-	if (ret) {
-		krdma_err("rdma_create_qp failed, ret %d\n", ret);
-		goto free_recv_cq;
-	}
-	cb->qp = cb->cm_id->qp;
-	krdma_debug("ib_create_qp succeed, cm_id %p\n", cb->cm_id);
-
-	/* Setup buffers. */
-	ret = krdma_setup_buffers(cb);
-	if (ret) {
-		krdma_err("krdma_setup_buffers failed, ret %d\n", ret);
-		goto free_buffers;
-	}
-
-	mutex_lock(&cb->rlock);
-	ret = krdma_post_recv(cb);
-	if (ret) {
-		krdma_err("krdma_post_recv failed, ret %d\n", ret);
-		mutex_unlock(&cb->rlock);
-		goto free_buffers;
-	}
-	mutex_unlock(&cb->rlock);
-
-	/* Connect to remote. */
-	memset(&conn_param, 0, sizeof(conn_param));
-	/*
-	 * The maximum number of times that a data transfer operation
-	 * should be retried on the connection when an error occurs. This setting controls
-	 * the number of times to retry send, RDMA, and atomic operations when timeouts
-	 * occur.
-	 */
-	conn_param.retry_count = 7;
-	/*
-	 * The maximum number of times that a send operation from the
-	 * remote peer should be retried on a connection after receiving a receiver not
-	 * ready (RNR) error.
-	 */
-	conn_param.rnr_retry_count = 7;
-
-	ret = rdma_connect(cb->cm_id, &conn_param);
-	if (ret) {
-		krdma_err("rdma_connect failed, ret %d\n", ret);
-		goto free_buffers;
-	}
-	wait_for_completion(&cb->cm_done);
-	if (cb->state != KRDMA_CONNECTED) {
-		krdma_err("wait for KRDMA_CONNECTED state, but get %d\n", cb->state);
-		if (cb->state == KRDMA_CONNECT_REJECTED)
-			ret = -CLIENT_RETRY;
-		else
-			ret = -CLIENT_EXIT;
-
-		goto free_buffers;
-	}
-	krdma_debug("krdma_connect_single succeed, cm_id %p\n", cb->cm_id);
+	ret = __krdma_connect(cb);
+	if (ret < 0)
+		goto out_release_cb;
 	return 0;
 
-free_buffers:
-	krdma_free_buffers(cb);
-	rdma_destroy_qp(cb->cm_id);
-free_recv_cq:
-	ib_destroy_cq(cb->recv_cq);
-free_send_cq:
-	ib_destroy_cq(cb->send_cq);
-free_pd:
-	ib_dealloc_pd(cb->pd);
-free_cm_id:
+out_release_cm_id:
 	rdma_destroy_id(cb->cm_id);
 	cb->cm_id = NULL;
-exit:
+	return ret;
+
+out_release_cb:
+	krdma_release_cb(cb);
 	return ret;
 }
 
@@ -419,9 +276,9 @@ int krdma_connect(const char *host, const char *port, struct krdma_cb **conn_cb)
 	if (host == NULL || port == NULL || conn_cb == NULL)
 		return -EINVAL;
 
-	ret = krdma_create_cb(&cb, KRDMA_CLIENT_CONN);
+	ret = __krdma_create_cb(&cb, KRDMA_CLIENT_CONN);
 	if (ret) {
-		krdma_err("krdma_create_cb fail, ret %d\n", ret);
+		krdma_err("__krdma_create_cb fail, ret %d\n", ret);
 		return ret;
 	}
 
@@ -446,6 +303,7 @@ retry:
 		msleep(1000);
 		goto retry;
 	}
+	kfree(cb);
 	*conn_cb = NULL;
 	krdma_err("krdma_connect_single failed, ret: %d\n", ret);
 	return ret;
@@ -454,61 +312,40 @@ retry:
 int krdma_listen(const char *host, const char *port, struct krdma_cb **listen_cb)
 {
 	int ret;
-	struct sockaddr_in addr;
 	struct krdma_cb *cb;
 
 	if (host == NULL || port == NULL || listen_cb == NULL)
 		return -EINVAL;
 
-	ret = krdma_create_cb(listen_cb, KRDMA_LISTEN_CONN);
+	ret = __krdma_create_cb(listen_cb, KRDMA_LISTEN_CONN);
 	if (ret) {
-		krdma_err("krdma_create_cb fail, ret %d\n", ret);
-		goto exit;
+		krdma_err("__krdma_create_cb fail, ret %d\n", ret);
+		return ret;
 	}
 	cb = *listen_cb;
 
-	/* Create cm_id. */
-	cb->cm_id = rdma_create_id(&init_net, krdma_cma_event_handler, cb,
-			RDMA_PS_TCP, IB_QPT_RC);
-	if (IS_ERR(cb->cm_id)) {
-		ret = PTR_ERR(cb->cm_id);
-		krdma_err("rdma_create_id error %d\n", ret);
-		goto exit;
-	}
-	krdma_debug("created cm_id %p\n", cb->cm_id);
-
-	/* Bind address. */
-	ret = krdma_set_addr(&addr, host, port);
+	ret = __krdma_bound_dev_local(cb, host, port);
 	if (ret < 0)
-		goto free_cm_id;
-	ret = rdma_bind_addr(cb->cm_id, (struct sockaddr *)&addr);
-	if (ret) {
-		krdma_err("rdma_bind_addr failed, ret %d\n", ret);
-		goto free_cm_id;
-	}
-	krdma_debug("rdma_bind_addr succeed, device[%s] port_num[%u]\n",
-			cb->cm_id->device->name, cb->cm_id->port_num);
-
-	ret = rdma_listen(cb->cm_id, 3);
-	if (ret) {
-		krdma_err("rdma_listen failed: %d\n", ret);
-		goto free_cm_id;
-	}
-	krdma_debug("rdma_listen start...\n");
+		goto out_free_cb;
+	
+	ret = __krdma_listen(cb);
+	if (ret < 0)
+		goto out_release_cm_id;
 	return 0;
 
-free_cm_id:
+out_release_cm_id:
 	rdma_destroy_id(cb->cm_id);
-exit:
+	cb->cm_id = NULL;
+	
+out_free_cb:
+	kfree(cb);
+	*listen_cb = NULL;
 	return ret;
 }
 
 int krdma_accept(struct krdma_cb *listen_cb, struct krdma_cb **accept_cb)
 {
 	int ret = 0;
-	struct ib_cq_init_attr cq_attr;
-	struct ib_qp_init_attr qp_init_attr;
-	struct rdma_conn_param conn_param;
 	struct krdma_cb *cb;
 
 	if (listen_cb == NULL) {
@@ -538,110 +375,23 @@ int krdma_accept(struct krdma_cb *listen_cb, struct krdma_cb **accept_cb)
 
 	krdma_debug("get connection, cm_id %p\n", cb->cm_id);
 
-	/* Create Protection Domain. */
-	cb->pd = ib_alloc_pd(cb->cm_id->device, 0);
-	if (IS_ERR(cb->pd)) {
-		krdma_err("ib_alloc_pd failed\n");
-		goto free_conn_cm_id;
-	}
-	krdma_debug("ib_alloc_pd succeed, cm_id %p\n", cb->cm_id);
+	ret = krdma_init_cb(cb);
+	if (ret < 0)
+		goto out_free_cb;
 
-	/* Create send Completion Queue. */
-	memset(&cq_attr, 0, sizeof(cq_attr));
-	cq_attr.cqe = RDMA_CQ_QUEUE_DEPTH;
-	cq_attr.comp_vector = 0;
-	cb->send_cq = ib_create_cq(cb->cm_id->device, NULL, NULL, cb, &cq_attr);
-	if (IS_ERR(cb->send_cq)) {
-		ret = PTR_ERR(cb->send_cq);
-		krdma_err("ib_create_cq failed, ret%d\n", ret);
-		goto free_pd;
-	}
-
-	/* Create recv Completion Queue. */
-	memset(&cq_attr, 0, sizeof(cq_attr));
-	cq_attr.cqe = RDMA_CQ_QUEUE_DEPTH;
-	cq_attr.comp_vector = 0;
-	cb->recv_cq = ib_create_cq(cb->cm_id->device, NULL, NULL, cb, &cq_attr);
-	if (IS_ERR(cb->recv_cq)) {
-		ret = PTR_ERR(cb->recv_cq);
-		krdma_err("ib_create_cq failed, ret%d\n", ret);
-		goto free_send_cq;
-	}
-
-	krdma_debug("ib_create_cq succeed, cm_id %p\n", cb->cm_id);
-
-	/* Create Queue Pair. */
-	memset(&qp_init_attr, 0, sizeof(qp_init_attr));
-	qp_init_attr.cap.max_send_wr = RDMA_SEND_QUEUE_DEPTH;
-	qp_init_attr.cap.max_recv_wr = RDMA_RECV_QUEUE_DEPTH;
-	qp_init_attr.cap.max_recv_sge = 1;
-	qp_init_attr.cap.max_send_sge = 1;
-	/* Mlx doesn't support inline sends for kernel QPs (yet) */
-	qp_init_attr.cap.max_inline_data = 0;
-	qp_init_attr.qp_type = IB_QPT_RC;
-	qp_init_attr.send_cq = cb->send_cq;
-	qp_init_attr.recv_cq = cb->recv_cq;
-	qp_init_attr.sq_sig_type = IB_SIGNAL_REQ_WR;
-	ret = rdma_create_qp(cb->cm_id, cb->pd, &qp_init_attr);
-	if (ret) {
-		krdma_err("rdma_create_qp failed, ret %d\n", ret);
-		goto free_recv_cq;
-	}
-	cb->qp = cb->cm_id->qp;
-	krdma_debug("ib_create_qp succeed, cm_id %p\n", cb->cm_id);
-
-	/* Setup buffers. */
-	ret = krdma_setup_buffers(cb);
-	if (ret) {
-		krdma_err("krdma_setup_buffers failed, ret %d\n", ret);
-		goto free_buffers;
-	}
-
-	mutex_lock(&cb->rlock);
-	ret = krdma_post_recv(cb);
-	if (ret) {
-		krdma_err("krdma_post_recv failed, ret %d\n", ret);
-		mutex_unlock(&cb->rlock);
-		goto free_buffers;
-	}
-	mutex_unlock(&cb->rlock);
-
-	/* Accept */
-	memset(&conn_param, 0, sizeof conn_param);
-	conn_param.retry_count = conn_param.rnr_retry_count = 7;
-
-	ret = rdma_accept(cb->cm_id, &conn_param);
-	if (ret) {
-		krdma_err("rdma_accept error: %d\n", ret);
-		goto free_buffers;
-	}
-	wait_for_completion(&cb->cm_done);
-	if (cb->state != KRDMA_CONNECTED) {
-		krdma_err("wait for KRDMA_CONNECTED state, but get %d\n", cb->state);
-		goto free_buffers;
-	}
-
-	krdma_debug("new connection accepted with the following attributes:\n"
-		"local: %pI4:%d\nremote: %pI4:%d\n",
-		&((struct sockaddr_in *)&cb->cm_id->route.addr.src_addr)->sin_addr.s_addr,
-		ntohs(((struct sockaddr_in *)&cb->cm_id->route.addr.src_addr)->sin_port),
-		&((struct sockaddr_in *)&cb->cm_id->route.addr.dst_addr)->sin_addr.s_addr,
-		ntohs(((struct sockaddr_in *)&cb->cm_id->route.addr.dst_addr)->sin_port));
+	ret = __krdma_accept(cb);
+	if (ret < 0)
+		goto out_release_cb;
 
 	return 0;
 
-free_buffers:
-	krdma_free_buffers(cb);
-	rdma_destroy_qp(cb->cm_id);
-free_recv_cq:
-	ib_destroy_cq(cb->recv_cq);
-free_send_cq:
-	ib_destroy_cq(cb->send_cq);
-free_pd:
-	ib_dealloc_pd(cb->pd);
-free_conn_cm_id:
-	rdma_destroy_id(cb->cm_id);
-	cb->cm_id = NULL;
+out_release_cb:
+	krdma_release_cb(cb);
+
+out_free_cb:
+	kfree(cb);
+	*accept_cb = NULL;
+
 exit:
 	return ret;
 }
@@ -686,6 +436,300 @@ int krdma_release_cb(struct krdma_cb *cb)
 
 	return 0;
 }
+
+static int __krdma_create_cb(struct krdma_cb **cbp, enum krdma_role role)
+{
+	struct krdma_cb *cb;
+
+	cb = kzalloc(sizeof(*cb), GFP_KERNEL);
+	if (!cb)
+		return -ENOMEM;
+	init_completion(&cb->cm_done);
+
+	cb->role = role;
+	if (cb->role == KRDMA_LISTEN_CONN) {
+		INIT_LIST_HEAD(&cb->ready_conn);
+		INIT_LIST_HEAD(&cb->active_conn);
+	}
+
+	*cbp = cb;
+	return 0;
+}
+
+/*
+ * Call rdma_resolve_route for dev detection
+ */
+static int __krdma_bound_dev_remote(struct krdma_cb *cb, const char *host, const char *port) {
+	int ret;
+	struct sockaddr_in addr;
+	
+	/* Create cm_id */
+	cb->cm_id = rdma_create_id(&init_net, krdma_cma_event_handler, cb,
+					RDMA_PS_TCP, IB_QPT_RC);
+	if (IS_ERR(cb->cm_id)) {
+		ret = PTR_ERR(cb->cm_id);
+		krdma_err("rdma_create_id error %d\n", ret);
+		goto exit;
+	}
+	krdma_debug("created cm_id %p\n", cb->cm_id);
+
+	/* Resolve address */
+	ret = krdma_set_addr(&addr, host, port);
+	if (ret < 0)
+		goto free_cm_id;
+	ret = rdma_resolve_addr(cb->cm_id, NULL,
+			(struct sockaddr *)&addr, RDMA_RESOLVE_TIMEOUT);
+	if (ret) {
+		krdma_err("rdma_resolve_addr failed, ret %d\n", ret);
+		goto free_cm_id;
+	}
+	wait_for_completion(&cb->cm_done);
+	if (cb->state != KRDMA_ADDR_RESOLVED) {
+		ret = -STATE_ERROR;
+		krdma_err("rdma_resolve_route state error, ret %d\n", ret);
+		goto free_cm_id;
+	}
+	krdma_debug("rdma_resolve_addr succeed, device[%s] port_num[%u]\n",
+			cb->cm_id->device->name, cb->cm_id->port_num);
+
+	/* Resolve route. */
+	ret = rdma_resolve_route(cb->cm_id, RDMA_RESOLVE_TIMEOUT);
+	if (ret) {
+		krdma_err("rdma_resolve_route failed, ret %d\n", ret);
+		goto free_cm_id;
+	}
+	wait_for_completion(&cb->cm_done);
+	if (cb->state != KRDMA_ROUTE_RESOLVED) {
+		ret = -STATE_ERROR;
+		krdma_err("rdma_resolve_route state error, ret %d\n", ret);
+		goto free_cm_id;
+	}
+	krdma_debug("rdma_resolve_route succeed, cm_id %p\n", cb->cm_id);
+
+	return 0;
+
+free_cm_id:
+	rdma_destroy_id(cb->cm_id);
+	cb->cm_id = NULL;
+exit:
+	return ret;
+}
+
+/*
+ * Call rdma_bind for ib dev detection
+ */
+static int __krdma_bound_dev_local(struct krdma_cb *cb, const char *host, const char *port) {
+	int ret;
+	struct sockaddr_in addr;
+
+	/* Create cm_id. */
+	cb->cm_id = rdma_create_id(&init_net, krdma_cma_event_handler, cb,
+			RDMA_PS_TCP, IB_QPT_RC);
+	if (IS_ERR(cb->cm_id)) {
+		ret = PTR_ERR(cb->cm_id);
+		krdma_err("rdma_create_id error %d\n", ret);
+		goto exit;
+	}
+	krdma_debug("created cm_id %p\n", cb->cm_id);
+
+	/* Bind address. */
+	ret = krdma_set_addr(&addr, host, port);
+	if (ret < 0)
+		goto free_cm_id;
+	ret = rdma_bind_addr(cb->cm_id, (struct sockaddr *)&addr);
+	if (ret) {
+		krdma_err("rdma_bind_addr failed, ret %d\n", ret);
+		goto free_cm_id;
+	}
+	krdma_debug("rdma_bind_addr succeed, device[%s] port_num[%u]\n",
+			cb->cm_id->device->name, cb->cm_id->port_num);
+
+	return 0;
+
+free_cm_id:
+	rdma_destroy_id(cb->cm_id);
+	cb->cm_id = NULL;
+exit:
+	return ret;
+}
+
+/* 
+ * Called after __krdma_bound_dev_{local, remote}.
+ * Allocate pd, cq, qp, mr, freed by caller
+ */
+static int krdma_init_cb(struct krdma_cb *cb) {
+	int ret;
+	struct ib_cq_init_attr cq_attr;
+	struct ib_qp_init_attr qp_init_attr;
+
+	/* Create Protection Domain. */
+	cb->pd = ib_alloc_pd(cb->cm_id->device, 0);
+	if (IS_ERR(cb->pd)) {
+		ret = PTR_ERR(cb->pd);
+		krdma_err("ib_alloc_pd failed\n");
+		goto exit;
+	}
+	krdma_debug("ib_alloc_pd succeed, cm_id %p\n", cb->cm_id);
+
+	/* Create send Completion Queue. */
+	memset(&cq_attr, 0, sizeof(cq_attr));
+	cq_attr.cqe = RDMA_CQ_QUEUE_DEPTH;
+	cq_attr.comp_vector = 0;
+	cb->send_cq = ib_create_cq(cb->cm_id->device, NULL, NULL, cb, &cq_attr);
+	if (IS_ERR(cb->send_cq)) {
+		ret = PTR_ERR(cb->send_cq);
+		krdma_err("ib_create_cq failed, ret%d\n", ret);
+		goto free_pd;
+	}
+
+	/* Create recv Completion Queue. */
+	memset(&cq_attr, 0, sizeof(cq_attr));
+	cq_attr.cqe = RDMA_CQ_QUEUE_DEPTH;
+	cq_attr.comp_vector = 0;
+	cb->recv_cq = ib_create_cq(cb->cm_id->device, NULL, NULL, cb, &cq_attr);
+	if (IS_ERR(cb->recv_cq)) {
+		ret = PTR_ERR(cb->recv_cq);
+		krdma_err("ib_create_cq failed, ret%d\n", ret);
+		goto free_send_cq;
+	}
+
+	krdma_debug("ib_create_cq succeed, cm_id %p\n", cb->cm_id);
+
+	/* Create Queue Pair. */
+	memset(&qp_init_attr, 0, sizeof(qp_init_attr));
+	qp_init_attr.cap.max_send_wr = RDMA_SEND_QUEUE_DEPTH;
+	qp_init_attr.cap.max_recv_wr = RDMA_RECV_QUEUE_DEPTH;
+	qp_init_attr.cap.max_recv_sge = 1;
+	qp_init_attr.cap.max_send_sge = 1;
+	/* Mlx doesn't support inline sends for kernel QPs (yet) */
+	qp_init_attr.cap.max_inline_data = 0;
+	qp_init_attr.qp_type = IB_QPT_RC;
+	qp_init_attr.send_cq = cb->send_cq;
+	qp_init_attr.recv_cq = cb->recv_cq;
+	qp_init_attr.sq_sig_type = IB_SIGNAL_REQ_WR;
+	ret = rdma_create_qp(cb->cm_id, cb->pd, &qp_init_attr);
+	if (ret) {
+		krdma_err("rdma_create_qp failed, ret %d\n", ret);
+		goto free_recv_cq;
+	}
+	cb->qp = cb->cm_id->qp;
+	krdma_debug("ib_create_qp succeed, cm_id %p\n", cb->cm_id);
+
+	/* Setup buffers. */
+	ret = krdma_setup_buffers(cb);
+	if (ret) {
+		krdma_err("krdma_setup_buffers failed, ret %d\n", ret);
+		goto free_qp;
+	}
+
+	mutex_lock(&cb->rlock);
+	ret = krdma_post_recv(cb);
+	if (ret) {
+		krdma_err("krdma_post_recv failed, ret %d\n", ret);
+		mutex_unlock(&cb->rlock);
+		goto free_buffers;
+	}
+	mutex_unlock(&cb->rlock);
+	return 0;
+
+free_buffers:
+	krdma_free_buffers(cb);
+free_qp:
+	rdma_destroy_qp(cb->cm_id);
+free_recv_cq:
+	ib_destroy_cq(cb->recv_cq);
+free_send_cq:
+	ib_destroy_cq(cb->send_cq);
+free_pd:
+	ib_dealloc_pd(cb->pd);
+exit:
+	return ret;
+}
+
+static int __krdma_connect(struct krdma_cb *cb) {
+	int ret;
+	struct rdma_conn_param conn_param;
+
+	/* Connect to remote. */
+	memset(&conn_param, 0, sizeof(conn_param));
+	/*
+	 * The maximum number of times that a data transfer operation
+	 * should be retried on the connection when an error occurs. This setting controls
+	 * the number of times to retry send, RDMA, and atomic operations when timeouts
+	 * occur.
+	 */
+	conn_param.retry_count = 7;
+	/*
+	 * The maximum number of times that a send operation from the
+	 * remote peer should be retried on a connection after receiving a receiver not
+	 * ready (RNR) error.
+	 */
+	conn_param.rnr_retry_count = 7;
+
+	ret = rdma_connect(cb->cm_id, &conn_param);
+	if (ret) {
+		krdma_err("rdma_connect failed, ret %d\n", ret);
+		return ret;
+	}
+	wait_for_completion(&cb->cm_done);
+	if (cb->state != KRDMA_CONNECTED) {
+		krdma_err("wait for KRDMA_CONNECTED state, but get %d\n", cb->state);
+		if (cb->state == KRDMA_CONNECT_REJECTED)
+			ret = -CLIENT_RETRY;
+		else
+			ret = -CLIENT_EXIT;
+
+		return ret;
+	}
+	krdma_debug("krdma_connect_single succeed, cm_id %p\n", cb->cm_id);
+	return 0;
+}
+
+static int __krdma_listen(struct krdma_cb *cb) {
+	int ret;
+
+	ret = rdma_listen(cb->cm_id, 3);
+	if (ret) {
+		krdma_err("rdma_listen failed: %d\n", ret);
+		return ret;
+	}
+	krdma_debug("rdma_listen start...\n");
+	return 0;
+}
+
+static int __krdma_accept(struct krdma_cb *cb) {
+	int ret;
+	struct rdma_conn_param conn_param;
+
+	/* Accept */
+	memset(&conn_param, 0, sizeof conn_param);
+	conn_param.retry_count = conn_param.rnr_retry_count = 7;
+
+	ret = rdma_accept(cb->cm_id, &conn_param);
+	if (ret) {
+		krdma_err("rdma_accept error: %d\n", ret);
+		goto exit;
+	}
+	wait_for_completion(&cb->cm_done);
+	if (cb->state != KRDMA_CONNECTED) {
+		krdma_err("wait for KRDMA_CONNECTED state, but get %d\n", cb->state);
+		goto exit;
+	}
+
+	krdma_debug("new connection accepted with the following attributes:\n"
+		"local: %pI4:%d\nremote: %pI4:%d\n",
+		&((struct sockaddr_in *)&cb->cm_id->route.addr.src_addr)->sin_addr.s_addr,
+		ntohs(((struct sockaddr_in *)&cb->cm_id->route.addr.src_addr)->sin_port),
+		&((struct sockaddr_in *)&cb->cm_id->route.addr.dst_addr)->sin_addr.s_addr,
+		ntohs(((struct sockaddr_in *)&cb->cm_id->route.addr.dst_addr)->sin_port));
+
+exit:
+	return ret;
+}
+
+////////////////////////////////////////////////////////////////////
+//////////////////////SEND/RECV Functions///////////////////////////
+////////////////////////////////////////////////////////////////////
 
 static int krdma_post_recv(struct krdma_cb *cb);
 /* @return wr_id of wc if polling succeed. */
