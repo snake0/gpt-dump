@@ -24,11 +24,7 @@
 #define EVAL_ITER 2000
 
 typedef struct tx_add {
-	/* Nodes indicated by inv_copyset should be sent INV messages upon write
-	 * fault. It's also used to transfer the complete copyset upon read fault. */
-	uint16_t inv_copyset;
-	/* Pages with different versions MAY have different data. */
-	uint16_t version;
+	uint32_t padding;
 	/*
 	 * (Hopefully) unique transcation id, which is used to eliminate the
 	 * necessity of per-socket locks.
@@ -45,7 +41,7 @@ typedef uint32_t extent_t;
 int ktcp_send(struct ktcp_cb *cb, const char *buffer, size_t length,
 		unsigned long flags, const tx_add_t *tx_add);
 
-int ktcp_receive(struct ktcp_cb *cb, char *buffer, size_t length,  unsigned long flags,
+int ktcp_receive(struct ktcp_cb *cb, char *buffer, unsigned long flags,
 		tx_add_t *tx_add);
 
 int ktcp_connect(const char *host, const char *port, struct ktcp_cb **conn_cb);

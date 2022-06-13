@@ -31,7 +31,6 @@
 #include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/kvm_host.h>
-#include <linux/vmalloc.h>
 
 #include "ktcp.h"
 
@@ -56,7 +55,7 @@ struct ktcp_cb
 	struct socket *socket;
 };
 
-#define KTCP_BUFFER_SIZE (sizeof(struct ktcp_hdr) + (1 << SIZE_SHIFT))
+#define KTCP_BUFFER_SIZE (sizeof(struct ktcp_hdr) + PAGE_SIZE)
 
 static int __ktcp_send(struct socket *sock, const char *buffer, size_t length,
 		unsigned long flags)
@@ -91,7 +90,7 @@ repeat_send:
 
 	ret = written != 0 ? written : len;
 	if (ret > 0 && ret != length) {
-		// printk(KERN_WARNING "ktcp_send send %d bytes which expected_size=%lu bytes", ret, length);
+		printk(KERN_WARNING "ktcp_send send %d bytes which expected_size=%lu bytes", ret, length);
 	}
 
 	if (ret < 0) {
@@ -107,17 +106,17 @@ int ktcp_send(struct ktcp_cb *cb, const char *buffer, size_t length,
 	int ret;
 	mm_segment_t oldmm;
 	struct ktcp_hdr hdr;
-	char local_buffer[KTCP_BUFFER_SIZE];
+	char *local_buffer;
 
 	mutex_lock(&cb->slock);
 	hdr.tx_add = *tx_add;
 	hdr.length = sizeof(hdr) + length;
 
-	// local_buffer = kzalloc(sizeof(hdr) + length, GFP_KERNEL);
-	// if (!local_buffer) {
-		// mutex_unlock(&cb->slock);
-		// return -ENOMEM;
-	// }
+	local_buffer = kzalloc(KTCP_BUFFER_SIZE, GFP_KERNEL);
+	if (!local_buffer) {
+		mutex_unlock(&cb->slock);
+		return -ENOMEM;
+	}
 	memcpy(local_buffer, &hdr, sizeof(hdr));
 	memcpy(local_buffer + sizeof(hdr), buffer, length);
 
@@ -128,7 +127,7 @@ int ktcp_send(struct ktcp_cb *cb, const char *buffer, size_t length,
 	
 	// Retrieve address access limit
 	set_fs(oldmm);
-	// kfree(local_buffer);
+	kfree(local_buffer);
 	mutex_unlock(&cb->slock);
 	return ret < 0 ? ret : length;
 }
@@ -172,7 +171,7 @@ static int build_ktcp_recv_output(ktcp_msg_t msg, char *buffer, tx_add_t *tx_add
 	real_length = hdr.length - sizeof(struct ktcp_hdr);
 	memcpy(buffer, (char *)msg.recv_buf + sizeof(struct ktcp_hdr), real_length);
 	*tx_add = hdr.tx_add;
-	vfree(msg.recv_buf);
+	kfree(msg.recv_buf);
 	return real_length;
 }
 
@@ -226,7 +225,7 @@ read_again:
 	return len;
 }
 
-int ktcp_receive(struct ktcp_cb *cb, char *buffer, size_t length, unsigned long flags,
+int ktcp_receive(struct ktcp_cb *cb, char *buffer, unsigned long flags,
 		tx_add_t *tx_add)
 {
 	struct ktcp_hdr hdr;
@@ -244,22 +243,22 @@ repoll:
 		mutex_unlock(&cb->rlock);
 		return ret;
 	}
-	local_buffer = vzalloc(sizeof(hdr) + length);
+	local_buffer = kzalloc(KTCP_BUFFER_SIZE, GFP_KERNEL);
 	if (!local_buffer) {
 		ret = -ENOMEM;
 		goto out;
 	}
-	ret = __ktcp_receive(cb->socket, local_buffer, sizeof(hdr) + length, flags);
+	ret = __ktcp_receive(cb->socket, local_buffer, KTCP_BUFFER_SIZE, flags);
 	if (ret < 0) {
 		if (ret == -EAGAIN) {
 			mutex_unlock(&cb->rlock);
 			usec_sleep = (usec_sleep + 1) > 1000 ? 1000 : (usec_sleep + 1);
 			usleep_range(usec_sleep, usec_sleep);
 			mutex_lock(&cb->rlock);
-			vfree(local_buffer);
+			kfree(local_buffer);
 			goto repoll;
 		}
-		vfree(local_buffer);
+		kfree(local_buffer);
 		printk(KERN_ERR "%s: __ktcp_receive error, ret %d\n",
 				__func__, ret);
 		goto out;
