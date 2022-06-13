@@ -1,0 +1,10 @@
+{
+    "files.associations": {
+        "Hakefile": "haskell",
+        "*.if": "objective-cpp",
+        "*.test": "shellscript",
+        "*.txt": "rst",
+        "thread": "c",
+        "__threading_support": "c"
+    }
+}

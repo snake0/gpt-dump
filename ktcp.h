@@ -23,15 +23,6 @@
 #define SIZE_SHIFT 21UL
 #define EVAL_ITER 2000
 
-typedef struct tx_add {
-	uint32_t padding;
-	/*
-	 * (Hopefully) unique transcation id, which is used to eliminate the
-	 * necessity of per-socket locks.
-	 */
-	uint16_t txid;
-} tx_add_t;
-
 struct tx_add;
 typedef struct tx_add tx_add_t;
 struct ktcp_cb;

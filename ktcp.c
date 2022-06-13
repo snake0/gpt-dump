@@ -34,6 +34,15 @@
 
 #include "ktcp.h"
 
+// struct tx_add {
+// 	uint32_t padding;
+// 	/*
+// 	 * (Hopefully) unique transcation id, which is used to eliminate the
+// 	 * necessity of per-socket locks.
+// 	 */
+// 	uint16_t txid;
+// };
+
 #define KTCP_RECV_BUF_SIZE 32
 
 struct ktcp_hdr {
