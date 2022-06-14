@@ -939,6 +939,19 @@ repoll:
 				return -STATE_ERROR;
 			}
 			break;
+		case IB_WC_RDMA_READ:
+			BUG_ON(type != KRDMA_READ);
+			krdma_debug("cb %p read completion, wr_id 0x%llx retry %d times\n",
+				cb, wc.wr_id, retry_cnt);
+			break;
+		case IB_WC_RDMA_WRITE:
+			BUG_ON(type != KRDMA_WRITE);
+			krdma_debug("cb %p write completion, wr_id 0x%llx retry %d times\n",
+				cb, wc.wr_id, retry_cnt);
+			/*if ((ret = (krdma_post_recv(cb))) < 0) {
+				return -STATE_ERROR;
+			}*/
+			break;
 		default:
 			krdma_err("Unexpected opcode %u\n", wc.opcode);
 			BUG();
