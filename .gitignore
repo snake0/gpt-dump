@@ -11,3 +11,5 @@ clique.mod.c
 .vscode
 ktcp.mod.c
 modules.order
+
+*.mod.c
