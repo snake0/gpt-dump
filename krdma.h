@@ -30,6 +30,7 @@
 
 #define RDMA_SEND_BUF_LEN (PAGE_SIZE * 1024)
 #define RDMA_RECV_BUF_LEN (PAGE_SIZE * 1024)
+#define RDMA_RDWR_BUF_LEN (PAGE_SIZE * 1024)
 
 typedef uint32_t imm_t;
 
@@ -47,13 +48,6 @@ enum krdma_code {
 	STATE_ERROR,
 };
 
-typedef struct krdma_rw_info {
-	uint64_t addr;
-	uint32_t rkey;
-	uint32_t qp_num;
-	uint16_t lid;
-} __attribute__((packed)) krdma_rw_info_t;
-
 typedef enum { 
 	KRDMA_SEND,
 	KRDMA_RECV,
@@ -67,6 +61,15 @@ typedef enum {
  * Polled: the request has been polled from the cq (but not been completed yet).
  */
 enum krdma_trans_state { INVALID = 0, POSTED, POLLED };
+
+typedef struct krdma_rw_info {
+	void *buf;
+	size_t length;
+	uint64_t addr;
+	uint32_t rkey;
+	uint32_t qp_num;
+	uint16_t lid;
+} __attribute__((packed)) krdma_rw_info_t;
 
 typedef struct krdma_send_trans {
 	/* For DMA */
@@ -92,7 +95,7 @@ typedef struct krdma_recv_trans {
 	struct ib_recv_wr rq_wr;
 } krdma_recv_trans_t;
 
-/* control block */
+/* control block that supports both RDMA send/recv and read/write */
 struct krdma_cb {
 	struct mutex slock;
 	struct mutex rlock;
@@ -128,8 +131,18 @@ struct krdma_cb {
 	/*
 	 * The buffers to buffer async requests.
 	 */
-	krdma_send_trans_t send_trans_buf[RDMA_SEND_BUF_SIZE];
-	krdma_recv_trans_t recv_trans_buf[RDMA_RECV_BUF_SIZE];
+	// Set to false in all send/recv APIs
+	bool read_write; // which mr?
+	union {
+		struct {
+			krdma_send_trans_t *send_trans_buf;
+			krdma_recv_trans_t *recv_trans_buf;
+		} sr_mr;
+		struct {
+			krdma_rw_info_t *local_info;
+			krdma_rw_info_t *remote_info;
+		} rw_mr;
+	} mr;
 
 	struct completion cm_done;
 
@@ -145,16 +158,29 @@ struct krdma_cb {
 
 void krdma_config(size_t max_buf_size);
 
+/* RDMA SEND/RECV APIs */
 int krdma_send(struct krdma_cb *cb, const char *buffer, size_t length);
 
 int krdma_receive(struct krdma_cb *cb, char *buffer);
 
+/* Called with remote host & port */
 int krdma_connect(const char *host, const char *port, struct krdma_cb **conn_cb);
 
 int krdma_listen(const char *host, const char *port, struct krdma_cb **listen_cb);
 
 int krdma_accept(struct krdma_cb *listen_cb, struct krdma_cb **accept_cb);
 
+/* RDMA SEND/RECV APIs */
+/* Called with remote host & port */
+int krdma_rw_init_client(const char *host, const char *port, struct krdma_cb **cbp);
+
+int krdma_rw_init_server(const char *host, const char *port, struct krdma_cb **cbp);
+
+int krdma_read(struct krdma_cb *cb, char *buffer, size_t length);
+
+int krdma_write(struct krdma_cb *cb, const char *buffer, size_t length);
+
+/* RDMA release API */
 int krdma_release_cb(struct krdma_cb *cb);
 
 #endif /* __KVM_X86_KRDMA_H */

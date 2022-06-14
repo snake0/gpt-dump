@@ -23,23 +23,28 @@
 #define SIZE_SHIFT 21UL
 #define EVAL_ITER 2000
 
-struct tx_add;
-typedef struct tx_add tx_add_t;
+typedef struct tx_add {
+	uint32_t padding;
+	/*
+	 * (Hopefully) unique transcation id, which is used to eliminate the
+	 * necessity of per-socket locks.
+	 */
+	uint16_t txid;
+} tx_add_t;
+
 struct ktcp_cb;
 
 typedef uint32_t extent_t;
 
-int ktcp_send(struct ktcp_cb *cb, const char *buffer, size_t length,
-		unsigned long flags, const tx_add_t *tx_add);
+int ktcp_send(struct ktcp_cb *cb, const char *buffer, size_t length);
 
-int ktcp_receive(struct ktcp_cb *cb, char *buffer, unsigned long flags,
-		tx_add_t *tx_add);
+int ktcp_receive(struct ktcp_cb *cb, char *buffer);
 
 int ktcp_connect(const char *host, const char *port, struct ktcp_cb **conn_cb);
 
 int ktcp_listen(const char *host, const char *port, struct ktcp_cb **listen_cb);
 
-int ktcp_accept(struct ktcp_cb *listen_cb, struct ktcp_cb **accept_cb, unsigned long flags);
+int ktcp_accept(struct ktcp_cb *listen_cb, struct ktcp_cb **accept_cb);
 
 int ktcp_release(struct ktcp_cb *conn_cb);
 

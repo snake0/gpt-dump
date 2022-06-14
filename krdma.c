@@ -10,6 +10,7 @@
  *   Yubin Chen <binsschen@sjtu.edu.cn>
  *   Zhuocheng Ding <tcbbd@sjtu.edu.cn>
  *   Jin Zhang <jzhang3002@sjtu.edu.cn>
+ *   Xingguo Jia <jiaxg1998@sjtu.edu.cn>
  *
  * This work is licensed under the terms of the GNU GPL, version 2.  See
  * the COPYING file in the top-level directory.
@@ -21,7 +22,7 @@
 #include <linux/inet.h>
 #include <linux/proc_fs.h>
 #include <linux/kthread.h>
-#include <linux/kvm_host.h>
+// #include <linux/kvm_host.h>
 
 #include "krdma.h"
 
@@ -42,18 +43,26 @@ static bool dbg = 1;
 
 /* Allocate cb, freed by caller */
 static int __krdma_create_cb(struct krdma_cb **cbp, enum krdma_role role);
+static int __krdma_free_cb(struct krdma_cb *cb);
 
 /* Allocate cb->cm_id, freed by caller */
+// remote host & port
 static int __krdma_bound_dev_remote(struct krdma_cb *cb, const char *host, const char *port);
+// local host & port
 static int __krdma_bound_dev_local(struct krdma_cb *cb, const char *host, const char *port);
 
-/* Allocate cb->pd, cb->cq, cb->qp, buffers, freed by caller */
+/* Allocate cb->pd, cb->cq, cb->qp, mr, freed by caller */
 static int krdma_init_cb(struct krdma_cb *cb);
+/* Deallocate cb->cm_id, cb->pd, cb->cq, cb->qp, mr */
+int krdma_release_cb(struct krdma_cb *cb);
 
 /* Call rdma_cm, allocate nothing */
 static int __krdma_connect(struct krdma_cb *cb);
 static int __krdma_listen(struct krdma_cb *cb);
 static int __krdma_accept(struct krdma_cb *cb);
+
+/* wait for rdma_cm RDMA_CM_EVENT_CONNECT_REQUEST */
+static struct krdma_cb *__krdma_wait_for_connect_request(struct krdma_cb *listen_cb);
 
 static int krdma_set_addr(struct sockaddr_in *addr, const char *host, const char *port) {
 	int ret;
@@ -140,100 +149,206 @@ static int krdma_cma_event_handler(struct rdma_cm_id *cm_id,
 	return 0;
 }
 
-static int krdma_setup_buffers(struct krdma_cb *cb)
-{
+/* MR for RDMA send recv */
+static int __krdma_setup_mr_sr(struct krdma_cb *cb) {
 	int i;
+	krdma_send_trans_t *send_trans_buf;
+	krdma_recv_trans_t *recv_trans_buf;
 
-	mutex_init(&cb->slock);
-	mutex_init(&cb->rlock);
+	BUG_ON(cb->read_write);
 
-	memset(cb->send_trans_buf, 0, RDMA_SEND_BUF_SIZE *
-			sizeof(krdma_send_trans_t));
-	memset(cb->recv_trans_buf, 0, RDMA_RECV_BUF_SIZE *
-			sizeof(krdma_recv_trans_t));
+	send_trans_buf = kzalloc(RDMA_SEND_BUF_SIZE *
+			sizeof(krdma_send_trans_t), GFP_KERNEL);
+	recv_trans_buf = kzalloc(RDMA_RECV_BUF_SIZE *
+			sizeof(krdma_recv_trans_t), GFP_KERNEL);
+	if (!(send_trans_buf && recv_trans_buf)) {
+		krdma_err("kzalloc send/recv_trans_buf failed\n");
+		goto exit;
+	}
+	cb->mr.sr_mr.send_trans_buf = send_trans_buf;
+	cb->mr.sr_mr.recv_trans_buf = recv_trans_buf;
 
 	for (i = 0; i < RDMA_SEND_BUF_SIZE; i++) {
-		cb->send_trans_buf[i].send_buf = ib_dma_alloc_coherent(cb->pd->device,
-				RDMA_SEND_BUF_LEN, &cb->send_trans_buf[i].send_dma_addr,
+		send_trans_buf[i].send_buf = ib_dma_alloc_coherent(cb->pd->device,
+				RDMA_SEND_BUF_LEN, &send_trans_buf[i].send_dma_addr,
 				GFP_KERNEL | GFP_DMA);
-		if (!cb->send_trans_buf[i].send_buf) {
+		if (!send_trans_buf[i].send_buf) {
 			krdma_err("ib_dma_alloc_coherent send_buf failed\n");
 			goto out_free_bufs;
 		}
 
-		cb->send_trans_buf[i].send_sge.lkey = cb->pd->local_dma_lkey;
+		send_trans_buf[i].send_sge.lkey = cb->pd->local_dma_lkey;
 		/* .length is set at runtime. */
-		cb->send_trans_buf[i].send_sge.addr = cb->send_trans_buf[i].send_dma_addr;
-		cb->send_trans_buf[i].sq_wr.next = NULL;
+		send_trans_buf[i].send_sge.addr = send_trans_buf[i].send_dma_addr;
+		send_trans_buf[i].sq_wr.next = NULL;
 		/* .wr_id is set at runtime. */
-		cb->send_trans_buf[i].sq_wr.sg_list = &cb->send_trans_buf[i].send_sge;
-		cb->send_trans_buf[i].sq_wr.num_sge = 1;
-		cb->send_trans_buf[i].sq_wr.opcode = IB_WR_SEND_WITH_IMM;
-		cb->send_trans_buf[i].sq_wr.send_flags = IB_SEND_SIGNALED;
+		send_trans_buf[i].sq_wr.sg_list = &send_trans_buf[i].send_sge;
+		send_trans_buf[i].sq_wr.num_sge = 1;
+		send_trans_buf[i].sq_wr.opcode = IB_WR_SEND_WITH_IMM;
+		send_trans_buf[i].sq_wr.send_flags = IB_SEND_SIGNALED;
 		/* .ex.imm_data is set at runtime. */
 	}
 
 	for (i = 0; i < RDMA_RECV_BUF_SIZE; i++) {
-		cb->recv_trans_buf[i].recv_buf = ib_dma_alloc_coherent(cb->pd->device,
-				RDMA_RECV_BUF_LEN, &cb->recv_trans_buf[i].recv_dma_addr,
+		recv_trans_buf[i].recv_buf = ib_dma_alloc_coherent(cb->pd->device,
+				RDMA_RECV_BUF_LEN, &recv_trans_buf[i].recv_dma_addr,
 				GFP_KERNEL | GFP_DMA);
-		if (!cb->recv_trans_buf[i].recv_buf) {
+		if (!recv_trans_buf[i].recv_buf) {
 			krdma_err("ib_dma_alloc_coherent recv_buf failed\n");
 			goto out_free_bufs;
 		}
 
-		cb->recv_trans_buf[i].recv_sge.lkey = cb->pd->local_dma_lkey;
-		cb->recv_trans_buf[i].recv_sge.length = RDMA_RECV_BUF_LEN;
-		cb->recv_trans_buf[i].recv_sge.addr = cb->recv_trans_buf[i].recv_dma_addr;
-		cb->recv_trans_buf[i].rq_wr.next = NULL;
-		cb->recv_trans_buf[i].rq_wr.wr_id = i;
-		cb->recv_trans_buf[i].rq_wr.sg_list = &cb->recv_trans_buf[i].recv_sge;
-		cb->recv_trans_buf[i].rq_wr.num_sge = 1;
+		recv_trans_buf[i].recv_sge.lkey = cb->pd->local_dma_lkey;
+		recv_trans_buf[i].recv_sge.length = RDMA_RECV_BUF_LEN;
+		recv_trans_buf[i].recv_sge.addr = recv_trans_buf[i].recv_dma_addr;
+		recv_trans_buf[i].rq_wr.next = NULL;
+		recv_trans_buf[i].rq_wr.wr_id = i;
+		recv_trans_buf[i].rq_wr.sg_list = &recv_trans_buf[i].recv_sge;
+		recv_trans_buf[i].rq_wr.num_sge = 1;
 	}
 
 	return 0;
 
 out_free_bufs:
 	for (i = 0; i < RDMA_SEND_BUF_SIZE; i++) {
-		if (cb->send_trans_buf[i].send_buf) {
+		if (send_trans_buf[i].send_buf) {
 			ib_dma_free_coherent(cb->pd->device, RDMA_SEND_BUF_LEN,
-					cb->send_trans_buf[i].send_buf,
-					cb->send_trans_buf[i].send_dma_addr);
+					send_trans_buf[i].send_buf,
+					send_trans_buf[i].send_dma_addr);
 		}
 	}
 	for (i = 0; i < RDMA_RECV_BUF_SIZE; i++) {
-		if (cb->recv_trans_buf[i].recv_buf) {
+		if (recv_trans_buf[i].recv_buf) {
 			ib_dma_free_coherent(cb->pd->device, RDMA_RECV_BUF_LEN,
-					cb->recv_trans_buf[i].recv_buf,
-					cb->recv_trans_buf[i].recv_dma_addr);
+					recv_trans_buf[i].recv_buf,
+					recv_trans_buf[i].recv_dma_addr);
 		}
 	}
+
+exit:
+	kfree(send_trans_buf);
+	kfree(recv_trans_buf);
 	return -ENOMEM;
 }
 
-static int krdma_free_buffers(struct krdma_cb *cb)
+static uint64_t __krdma_virt_to_dma(
+	struct krdma_cb *cb, void *addr, size_t length, bool physical_allocation) {
+	struct ib_device *ibd = cb->pd->device;
+
+	return physical_allocation ?
+		(uint64_t) phys_to_dma(ibd->dma_device, (phys_addr_t) virt_to_phys(addr))
+	:	(uint64_t) ib_dma_map_single(ibd, addr, length, DMA_BIDIRECTIONAL);
+}
+
+/* MR for RDMA read write */
+static int __krdma_setup_mr_rw(struct krdma_cb *cb, bool physical_allocation) {
+	krdma_rw_info_t *local_info;
+	krdma_rw_info_t *remote_info;
+	struct ib_port_attr port_attr;
+	void *buf;
+	int ret;
+
+	BUG_ON(!cb->read_write);
+
+	local_info = kzalloc(sizeof(krdma_rw_info_t), GFP_KERNEL);
+	if (!local_info) {
+		krdma_err("local_info alloc failed.\n");
+		goto exit;
+	}
+	cb->mr.rw_mr.local_info = local_info;
+
+	remote_info = kzalloc(sizeof(krdma_rw_info_t), GFP_KERNEL);
+	if (!remote_info) {
+		krdma_err("remote_info alloc failed.\n");
+		goto out_free_local_info;
+	}
+	cb->mr.rw_mr.remote_info = remote_info;
+
+	buf = kmalloc(RDMA_RDWR_BUF_LEN, GFP_KERNEL);
+	if (!buf) {
+		krdma_err("buf alloc failed.\n");
+		goto out_free_remote_info;
+	}
+	local_info->buf = buf;
+
+	local_info->length = RDMA_RDWR_BUF_LEN;
+	local_info->addr = __krdma_virt_to_dma(cb, local_info->buf, local_info->length, 1);
+	local_info->rkey = cb->pd->unsafe_global_rkey;
+	local_info->qp_num = cb->qp->qp_num;
+	
+	ret = ib_query_port(cb->cm_id->device, cb->cm_id->port_num, &port_attr);
+	if (ret) {
+		krdma_err("ib_query_port failed.\n");
+		goto out_free_buf;
+	}
+
+	local_info->lid = port_attr.lid;
+	return 0;
+
+out_free_buf:
+	kfree(buf);
+	cb->mr.rw_mr.local_info->buf = NULL;
+
+out_free_remote_info:
+	kfree(remote_info);
+	cb->mr.rw_mr.remote_info = NULL;
+
+out_free_local_info:
+	kfree(local_info);
+	cb->mr.rw_mr.local_info = NULL;
+exit:
+	return -ENOMEM;
+}
+
+static int krdma_setup_mr(struct krdma_cb *cb) {
+	return cb->read_write ? __krdma_setup_mr_rw(cb, true) : __krdma_setup_mr_sr(cb);
+}
+
+static int __krdma_free_mr_sr(struct krdma_cb *cb)
 {
 	int i;
+	krdma_send_trans_t *send_trans_buf = cb->mr.sr_mr.send_trans_buf;
+	krdma_recv_trans_t *recv_trans_buf = cb->mr.sr_mr.recv_trans_buf;
+	BUG_ON(cb->read_write);
 
 	for (i = 0; i < RDMA_SEND_BUF_SIZE; i++) {
-		if (cb->send_trans_buf[i].send_buf) {
+		if (send_trans_buf[i].send_buf) {
 			ib_dma_free_coherent(cb->pd->device, RDMA_SEND_BUF_LEN,
-					cb->send_trans_buf[i].send_buf,
-					cb->send_trans_buf[i].send_dma_addr);
-			cb->send_trans_buf[i].send_buf = NULL;
+					send_trans_buf[i].send_buf,
+					send_trans_buf[i].send_dma_addr);
+			send_trans_buf[i].send_buf = NULL;
 		}
 	}
 	for (i = 0; i < RDMA_RECV_BUF_SIZE; i++) {
-		if (cb->recv_trans_buf[i].recv_buf) {
+		if (recv_trans_buf[i].recv_buf) {
 			ib_dma_free_coherent(cb->pd->device, RDMA_RECV_BUF_LEN,
-					cb->recv_trans_buf[i].recv_buf,
-					cb->recv_trans_buf[i].recv_dma_addr);
+					recv_trans_buf[i].recv_buf,
+					recv_trans_buf[i].recv_dma_addr);
 		}
-		cb->recv_trans_buf[i].recv_buf = NULL;
+		recv_trans_buf[i].recv_buf = NULL;
 	}
+	kfree(send_trans_buf);
+	kfree(recv_trans_buf);
 
 	return 0;
 }
+
+static int __krdma_free_mr_rw(struct krdma_cb *cb) {
+	int ret = 0;
+
+	kfree(cb->mr.rw_mr.local_info->buf);
+	kfree(cb->mr.rw_mr.remote_info);
+	cb->mr.rw_mr.remote_info = NULL;
+	kfree(cb->mr.rw_mr.local_info);
+	cb->mr.rw_mr.local_info = NULL;
+
+	return ret;
+}
+
+static int krdma_free_mr(struct krdma_cb *cb) {
+	return cb->read_write ? __krdma_free_mr_rw(cb) : __krdma_free_mr_sr(cb);
+}
+
 
 static int krdma_post_recv(struct krdma_cb *cb);
 
@@ -281,6 +396,7 @@ int krdma_connect(const char *host, const char *port, struct krdma_cb **conn_cb)
 		krdma_err("__krdma_create_cb fail, ret %d\n", ret);
 		return ret;
 	}
+	cb->read_write = false;
 
 retry:
 	ret = krdma_connect_single(host, port, cb);
@@ -293,7 +409,7 @@ retry:
 		 */
 		smp_mb();
 		*conn_cb = cb;
-		printk("%s: %p krdma_connect succeed\n", __func__, cb);
+		krdma_debug("%p krdma_connect succeed\n", cb);
 		return 0;
 	}
 	if (ret == -CLIENT_RETRY &&
@@ -303,7 +419,7 @@ retry:
 		msleep(1000);
 		goto retry;
 	}
-	kfree(cb);
+	__krdma_free_cb(cb);
 	*conn_cb = NULL;
 	krdma_err("krdma_connect_single failed, ret: %d\n", ret);
 	return ret;
@@ -323,6 +439,7 @@ int krdma_listen(const char *host, const char *port, struct krdma_cb **listen_cb
 		return ret;
 	}
 	cb = *listen_cb;
+	cb->read_write = false;
 
 	ret = __krdma_bound_dev_local(cb, host, port);
 	if (ret < 0)
@@ -338,9 +455,32 @@ out_release_cm_id:
 	cb->cm_id = NULL;
 	
 out_free_cb:
-	kfree(cb);
+	__krdma_free_cb(cb);
 	*listen_cb = NULL;
 	return ret;
+}
+
+static struct krdma_cb *__krdma_wait_for_connect_request(struct krdma_cb *listen_cb) {
+	struct krdma_cb *cb;
+
+	while (list_empty(&listen_cb->ready_conn)) {
+		wait_for_completion_interruptible(&listen_cb->cm_done);
+		if (listen_cb->state == KRDMA_ERROR) {
+			krdma_err("rdma_listen cancel\n");
+			goto exit;
+		}
+		if (kthread_should_stop())
+			goto exit;
+	}
+
+	/* Pick a ready connnection. */
+	cb = list_first_entry(&listen_cb->ready_conn, struct krdma_cb, list);
+	list_del(&cb->list);
+	list_add_tail(&cb->list, &listen_cb->active_conn);
+	return cb;
+
+exit:
+	return NULL;
 }
 
 int krdma_accept(struct krdma_cb *listen_cb, struct krdma_cb **accept_cb)
@@ -354,24 +494,21 @@ int krdma_accept(struct krdma_cb *listen_cb, struct krdma_cb **accept_cb)
 		goto exit;
 	}
 
-	while (list_empty(&listen_cb->ready_conn)) {
-		wait_for_completion_interruptible(&listen_cb->cm_done);
-		if (listen_cb->state == KRDMA_ERROR) {
-			krdma_err("rdma_listen cancel\n");
-			ret = -SERVER_EXIT;
-			goto exit;
-		}
-		if (kthread_should_stop()) {
-			ret = -SERVER_EXIT;
-			goto exit;
-		}
+	if (accept_cb == NULL) {
+		krdma_err("null accept_cb\n");
+		ret = -EINVAL;
+		goto exit;
 	}
 
-	/* Pick a ready connnection. */
-	cb = list_first_entry(&listen_cb->ready_conn, struct krdma_cb, list);
-	list_del(&cb->list);
-	list_add_tail(&cb->list, &listen_cb->active_conn);
+	cb = __krdma_wait_for_connect_request(listen_cb);
+	if (cb == NULL) {
+		krdma_err("__krdma_wait_for_connect_request failed.\n");
+		ret = -STATE_ERROR;
+		goto exit;
+	}
+
 	*accept_cb = cb;
+	cb->read_write = false;
 
 	krdma_debug("get connection, cm_id %p\n", cb->cm_id);
 
@@ -389,7 +526,7 @@ out_release_cb:
 	krdma_release_cb(cb);
 
 out_free_cb:
-	kfree(cb);
+	__krdma_free_cb(cb);
 	*accept_cb = NULL;
 
 exit:
@@ -411,7 +548,7 @@ int krdma_release_cb(struct krdma_cb *cb)
 	if (cb->cm_id->qp)
 		rdma_destroy_qp(cb->cm_id);
 
-	krdma_free_buffers(cb);
+	krdma_free_mr(cb);
 	if (cb->send_cq)
 		ib_destroy_cq(cb->send_cq);
 	if (cb->recv_cq)
@@ -451,8 +588,16 @@ static int __krdma_create_cb(struct krdma_cb **cbp, enum krdma_role role)
 		INIT_LIST_HEAD(&cb->ready_conn);
 		INIT_LIST_HEAD(&cb->active_conn);
 	}
+	mutex_init(&cb->slock);
+	mutex_init(&cb->rlock);
 
-	*cbp = cb;
+	if (cbp)
+		*cbp = cb;
+	return 0;
+}
+
+static int __krdma_free_cb(struct krdma_cb *cb) {
+	kfree(cb);
 	return 0;
 }
 
@@ -563,7 +708,7 @@ static int krdma_init_cb(struct krdma_cb *cb) {
 	struct ib_qp_init_attr qp_init_attr;
 
 	/* Create Protection Domain. */
-	cb->pd = ib_alloc_pd(cb->cm_id->device, 0);
+	cb->pd = ib_alloc_pd(cb->cm_id->device, IB_PD_UNSAFE_GLOBAL_RKEY);
 	if (IS_ERR(cb->pd)) {
 		ret = PTR_ERR(cb->pd);
 		krdma_err("ib_alloc_pd failed\n");
@@ -616,9 +761,9 @@ static int krdma_init_cb(struct krdma_cb *cb) {
 	krdma_debug("ib_create_qp succeed, cm_id %p\n", cb->cm_id);
 
 	/* Setup buffers. */
-	ret = krdma_setup_buffers(cb);
+	ret = krdma_setup_mr(cb);
 	if (ret) {
-		krdma_err("krdma_setup_buffers failed, ret %d\n", ret);
+		krdma_err("krdma_setup_mr failed, ret %d\n", ret);
 		goto free_qp;
 	}
 
@@ -633,7 +778,7 @@ static int krdma_init_cb(struct krdma_cb *cb) {
 	return 0;
 
 free_buffers:
-	krdma_free_buffers(cb);
+	krdma_free_mr(cb);
 free_qp:
 	rdma_destroy_qp(cb->cm_id);
 free_recv_cq:
@@ -839,11 +984,12 @@ static bool search_send_buf(struct krdma_cb *cb, uint16_t txid,
 		krdma_send_trans_t **trans, enum krdma_trans_state state)
 {
 	int i;
+	krdma_send_trans_t *send_trans_buf = cb->mr.sr_mr.send_trans_buf;
 
 	for (i = 0; i < RDMA_SEND_BUF_SIZE; i++) {
-		if (cb->send_trans_buf[i].state == state && cb->send_trans_buf[i].txid
+		if (send_trans_buf[i].state == state && send_trans_buf[i].txid
 				== txid) {
-			*trans = &cb->send_trans_buf[i];
+			*trans = &send_trans_buf[i];
 			return true;
 		}
 	}
@@ -854,11 +1000,12 @@ static bool search_recv_buf(struct krdma_cb *cb, uint16_t txid,
 		krdma_recv_trans_t **trans, enum krdma_trans_state state)
 {
 	int i;
+	krdma_recv_trans_t *recv_trans_buf = cb->mr.sr_mr.recv_trans_buf;
 
 	for (i = 0; i < RDMA_RECV_BUF_SIZE; i++) {
-		if (cb->recv_trans_buf[i].state == state &&
-				(cb->recv_trans_buf[i].txid == txid || txid == 0xFF)) {
-			*trans = &cb->recv_trans_buf[i];
+		if (recv_trans_buf[i].state == state &&
+				(recv_trans_buf[i].txid == txid || txid == 0xFF)) {
+			*trans = &recv_trans_buf[i];
 			return true;
 		}
 	}
@@ -868,6 +1015,7 @@ static bool search_recv_buf(struct krdma_cb *cb, uint16_t txid,
 static int search_empty_send_buf(struct krdma_cb *cb, krdma_send_trans_t **trans)
 {
 	int i;
+	krdma_send_trans_t *send_trans_buf = cb->mr.sr_mr.send_trans_buf;
 
 	/* TODO: Is this necessary? */
 	static int last_schedule = 0;
@@ -875,8 +1023,8 @@ static int search_empty_send_buf(struct krdma_cb *cb, krdma_send_trans_t **trans
 	last_schedule = (last_schedule + 1) % RDMA_SEND_BUF_SIZE;
 
 	for (i = last_schedule; i < last_schedule + RDMA_SEND_BUF_SIZE; i++) {
-		if (cb->send_trans_buf[i % RDMA_SEND_BUF_SIZE].state == INVALID) {
-			*trans = &cb->send_trans_buf[i % RDMA_SEND_BUF_SIZE];
+		if (send_trans_buf[i % RDMA_SEND_BUF_SIZE].state == INVALID) {
+			*trans = &send_trans_buf[i % RDMA_SEND_BUF_SIZE];
 			last_schedule = i % RDMA_SEND_BUF_SIZE;
 			return i % RDMA_SEND_BUF_SIZE;
 		}
@@ -888,10 +1036,11 @@ static int search_empty_send_buf(struct krdma_cb *cb, krdma_send_trans_t **trans
 static int search_empty_recv_buf(struct krdma_cb *cb, krdma_recv_trans_t **trans)
 {
 	int i;
+	krdma_recv_trans_t *recv_trans_buf = cb->mr.sr_mr.recv_trans_buf;
 
 	for (i = 0; i < RDMA_RECV_BUF_SIZE; i++) {
-		if (cb->recv_trans_buf[i].state == INVALID) {
-			*trans = &cb->recv_trans_buf[i];
+		if (recv_trans_buf[i].state == INVALID) {
+			*trans = &recv_trans_buf[i];
 			return i;
 		}
 	}
@@ -967,10 +1116,11 @@ static int krdma_post_recv(struct krdma_cb *cb)
 	int slot;
 	krdma_recv_trans_t *recv_trans;
 	struct ib_recv_wr *bad_wr;
+	krdma_recv_trans_t *recv_trans_buf = cb->mr.sr_mr.recv_trans_buf;
 
 	while ((slot = search_empty_recv_buf(cb, &recv_trans)) != -ENOENT) {
 		build_posted_recv_trans(cb, recv_trans);
-		ret = ib_post_recv(cb->qp, &cb->recv_trans_buf[slot].rq_wr, &bad_wr);
+		ret = ib_post_recv(cb->qp, &recv_trans_buf[slot].rq_wr, &bad_wr);
 		if (ret) {
 			krdma_err("ib_post_recv error, ret %d\n", ret);
 			return -STATE_ERROR;
@@ -1000,8 +1150,10 @@ int krdma_receive(struct krdma_cb *cb, char *buffer)
 	krdma_recv_trans_t *recv_trans;
 	int retry_cnt = 0;
 	unsigned long flag = SOCK_NONBLOCK;
+	krdma_recv_trans_t *recv_trans_buf = cb->mr.sr_mr.recv_trans_buf;
 
 	BUILD_BUG_ON(sizeof(tx_add_t) < sizeof(imm_t));
+	BUG_ON(cb->read_write);
 
 	krdma_debug("%s: cb %p receive 0x%x\n", __func__, cb, tx_add.txid);
 
@@ -1042,7 +1194,7 @@ repoll:
 	}
 	usec_sleep = 0;
 
-	recv_trans = &cb->recv_trans_buf[ret];
+	recv_trans = &recv_trans_buf[ret];
 	if (unlikely(recv_trans->state != POSTED)) {
 		mutex_unlock(&cb->rlock);
 		BUG();
@@ -1079,21 +1231,23 @@ int krdma_send(struct krdma_cb *cb, const char *buffer, size_t length)
 	uint16_t txid = tx_add.txid;
 	size_t recv_length;
 	int slot;
+	krdma_send_trans_t *send_trans_buf = cb->mr.sr_mr.send_trans_buf;
 
+	BUG_ON(cb->read_write);
 	mutex_lock(&cb->slock);
 
 	slot = search_empty_send_buf(cb, &send_trans);
 	build_posted_send_trans(cb, txid, send_trans);
 	krdma_debug("%s: cb %p send 0x%x length %lu\n", __func__, cb, send_trans->txid, length);
 
-	cb->send_trans_buf[slot].send_sge.length = length + (sizeof(tx_add_t) - sizeof(imm_t));
-	cb->send_trans_buf[slot].sq_wr.wr_id = tx_add.txid;
-	cb->send_trans_buf[slot].sq_wr.ex.imm_data = htonl(*(const uint32_t*) &tx_add);
-	memcpy(cb->send_trans_buf[slot].send_buf + length, (((const char *) &tx_add) + sizeof(imm_t)),
+	send_trans_buf[slot].send_sge.length = length + (sizeof(tx_add_t) - sizeof(imm_t));
+	send_trans_buf[slot].sq_wr.wr_id = tx_add.txid;
+	send_trans_buf[slot].sq_wr.ex.imm_data = htonl(*(const uint32_t*) &tx_add);
+	memcpy(send_trans_buf[slot].send_buf + length, (((const char *) &tx_add) + sizeof(imm_t)),
 			sizeof(tx_add_t) - sizeof(imm_t));
-	memcpy(cb->send_trans_buf[slot].send_buf, buffer, length);
+	memcpy(send_trans_buf[slot].send_buf, buffer, length);
 
-	ret = ib_post_send(cb->qp, &cb->send_trans_buf[slot].sq_wr, &bad_wr);
+	ret = ib_post_send(cb->qp, &send_trans_buf[slot].sq_wr, &bad_wr);
 	if (ret) {
 		mutex_unlock(&cb->slock);
 		krdma_err("ib_post_send failed, ret %d\n", ret);
@@ -1134,6 +1288,325 @@ int krdma_send(struct krdma_cb *cb, const char *buffer, size_t length)
 	return ret >= 0 ? length : ret;
 }
 
+////////////////////////////////////////////////////////////////////
+//////////////////RDMA READ/WRITE Functions/////////////////////////
+////////////////////////////////////////////////////////////////////
+
+static void dump_rw_info(krdma_rw_info_t *info, char *desc) {
+	if (!info || !desc) {
+		krdma_err("NULL info!\n");
+		return;
+	}
+	krdma_debug("[krdma_rw_info_t]: %s = { addr %llu, rkey %u, qp_num %d, lid %hu }\n",
+		desc, info->addr, info->rkey, info->qp_num, info->lid);
+}
+
+static const char *server_host = "10.0.16.6";
+static const char *server_port = "22421";
+
+static int krdma_exch_info_client(struct krdma_cb *cb) {
+	int ret = 0;
+	struct ktcp_cb *conn_tcp = NULL;
+	krdma_rw_info_t *local_info = cb->mr.rw_mr.local_info;
+	krdma_rw_info_t *remote_info = cb->mr.rw_mr.remote_info;
+
+	if (!(local_info && remote_info)) {
+		krdma_err("NULL info!\n");
+		return -EINVAL;
+	}
+
+	ret = ktcp_connect(server_host, server_port, &conn_tcp);
+	if (ret < 0) {
+		krdma_err("ktcp_connect failed with ret %d.\n", ret);
+		goto out_release_tcp;
+	}
+
+	ret = ktcp_send(conn_tcp, 
+		(const char *) local_info, sizeof(krdma_rw_info_t));
+	if (ret < 0 || ret < sizeof(krdma_rw_info_t)) {
+		krdma_err("ktcp_send failed with ret %d.\n", ret);
+		goto out_release_tcp;
+	}
+
+	ret = ktcp_receive(conn_tcp, (char *) remote_info);
+	if (ret < 0 || ret < sizeof(krdma_rw_info_t)) {
+		krdma_err("ktcp_receive failed with ret %d.\n", ret);
+		goto out_release_tcp;
+	}
+
+	dump_rw_info(local_info, "Client local_info");
+	dump_rw_info(remote_info, "Client remote_info");
+
+out_release_tcp:
+	ktcp_release(conn_tcp);
+	return ret > 0 ? -ret : ret;
+}
+
+static int krdma_exch_info_server(struct krdma_cb *cb) {
+	int ret = 0;
+	struct ktcp_cb *listen_tcp = NULL;
+	struct ktcp_cb *accept_tcp = NULL;
+	krdma_rw_info_t *local_info = cb->mr.rw_mr.local_info;
+	krdma_rw_info_t *remote_info = cb->mr.rw_mr.remote_info;
+
+	if (!(local_info && remote_info)) {
+		krdma_err("NULL info!\n");
+		return -EINVAL;
+	}
+
+	ret = ktcp_listen(server_host, server_port, &listen_tcp);
+	if (ret < 0) {
+		krdma_err("ktcp_listen failed with ret %d.\n", ret);
+		goto exit;
+	}
+
+	ret = ktcp_accept(listen_tcp, &accept_tcp);
+	if (ret < 0) {
+		krdma_err("ktcp_accept failed with ret %d.\n", ret);
+		goto out_release_listen_tcp;
+	}
+
+	ret = ktcp_receive(accept_tcp, (char *) remote_info);
+	if (ret < 0 || ret < sizeof(krdma_rw_info_t)) {
+		krdma_err("ktcp_receive failed with ret %d.\n", ret);
+		goto out_release_accept_tcp;
+	}
+
+	ret = ktcp_send(accept_tcp, 
+		(const char *) local_info, sizeof(krdma_rw_info_t));
+	if (ret < 0 || ret < sizeof(krdma_rw_info_t)) {
+		krdma_err("ktcp_send failed with ret %d.\n", ret);
+		goto out_release_accept_tcp;
+	}
+
+	dump_rw_info(local_info, "Server local_info");
+	dump_rw_info(remote_info, "Server remote_info");
+
+out_release_accept_tcp:
+	ktcp_release(accept_tcp);
+out_release_listen_tcp:
+	ktcp_release(listen_tcp);
+exit:
+	return ret > 0 ? -ret : ret;
+}
+
+int krdma_rw_init_client(const char *host, const char *port, struct krdma_cb **conn_cb) {
+	int ret;
+	struct krdma_cb *cb;
+
+	if (host == NULL || port == NULL || conn_cb == NULL)
+		return -EINVAL;
+
+	ret = __krdma_create_cb(&cb, KRDMA_CLIENT_CONN);
+	if (ret) {
+		krdma_err("__krdma_create_cb fail, ret %d\n", ret);
+		return ret;
+	}
+	cb->read_write = true;
+
+retry:
+	ret = krdma_connect_single(host, port, cb);
+	if (ret == 0) {
+		/*
+		 * If multiple clients desire to connect to remote servers, only one of
+		 * them can call this function. Others must be blocked even if conn_cb
+		 * has not been set here. Then double checking whether conn_cb is
+		 * non-NULL can ensure the correctness of lazy connection.
+		 */
+		smp_mb();
+		*conn_cb = cb;
+		goto rest_client_init;
+	}
+	if (ret == -CLIENT_RETRY &&
+				++cb->retry_count < RDMA_CONNECT_RETRY_MAX) {
+		krdma_err("krdma_connect_single failed, retry_count %d, " \
+				"reconnecting...\n", cb->retry_count);
+		msleep(1000);
+		goto retry;
+	}
+	goto out_free_cb;
+
+
+rest_client_init:
+	ret = krdma_exch_info_client(cb);
+	if (ret < 0) {
+		krdma_err("krdma_exch_info_client failed with ret %d\n", ret);
+		goto out_release_cb;
+	}
+
+out_release_cb:
+	krdma_release_cb(cb);
+out_free_cb:
+	__krdma_free_cb(cb);
+	*conn_cb = NULL;
+	krdma_err("krdma_rw_init_client failed, ret: %d\n", ret);
+	return ret;
+}
+
+int krdma_rw_init_server(const char *host, const char *port, struct krdma_cb **cbp) {
+	int ret;
+	struct krdma_cb *accept_cb;
+	struct krdma_cb *listen_cb;
+	
+	ret = krdma_listen(host, port, &listen_cb);
+	if (ret < 0) {
+		krdma_err("krdma_listen failed.\n");
+		goto exit;
+	}
+	listen_cb->read_write = true;
+
+	accept_cb = __krdma_wait_for_connect_request(listen_cb);
+	if (accept_cb == NULL) {
+		krdma_err("__krdma_wait_for_connect_request failed.\n");
+		ret = -STATE_ERROR;
+		goto out_release_listen_cb;
+	}
+	accept_cb->read_write = true;
+	*cbp = accept_cb;
+
+	krdma_debug("get connection, cm_id %p\n", accept_cb->cm_id);
+
+	ret = krdma_init_cb(accept_cb);
+	if (ret < 0)
+		goto out_free_accept_cb;
+
+	ret = __krdma_accept(accept_cb);
+	if (ret < 0)
+		goto out_release_accept_cb;
+	
+	ret = krdma_exch_info_server(accept_cb);
+	if (ret < 0)
+		goto out_release_accept_cb;
+	
+	return 0;
+
+out_release_accept_cb:
+	krdma_release_cb(accept_cb);
+	
+out_free_accept_cb:
+	__krdma_free_cb(accept_cb);
+	*cbp = NULL;
+
+out_release_listen_cb:
+	rdma_destroy_id(listen_cb->cm_id);
+	__krdma_free_cb(listen_cb);
+exit:
+	return ret;
+}
+
+static void build_krdma_read_output(
+	struct krdma_cb *cb, char *buffer, size_t length) {
+	BUG_ON(!cb->read_write);
+	if (!cb)
+		return;
+	memcpy(buffer, cb->mr.rw_mr.local_info->buf, length);
+}
+
+static void build_krdma_write_input(
+	struct krdma_cb *cb, const char *buffer, size_t length) {
+	BUG_ON(!cb->read_write);
+	if (!cb)
+		return;
+	memcpy(cb->mr.rw_mr.local_info->buf, buffer, length);
+}
+
+int krdma_read(struct krdma_cb *cb, char *buffer, size_t length) {
+	struct ib_rdma_wr rdma_wr;
+	struct ib_send_wr *bad_wr = NULL;
+	struct ib_sge sge[1];
+	int ret;
+	imm_t imm;
+	size_t len;
+
+	BUG_ON(!cb->read_write);
+
+	memset(sge, 0, sizeof(sge));
+	memset(&rdma_wr, 0, sizeof(rdma_wr));
+
+	sge[0].addr = cb->mr.rw_mr.local_info->addr;
+	sge[0].length = cb->mr.rw_mr.local_info->length;
+	sge[0].lkey = cb->pd->local_dma_lkey;
+
+	rdma_wr.remote_addr = (uintptr_t) cb->mr.rw_mr.remote_info->addr;
+	rdma_wr.rkey = cb->mr.rw_mr.remote_info->rkey;
+
+	rdma_wr.wr.sg_list = sge;
+	rdma_wr.wr.wr_id = 999;
+	rdma_wr.wr.opcode = IB_WR_RDMA_READ;
+	rdma_wr.wr.send_flags = IB_SEND_SIGNALED;
+	rdma_wr.wr.num_sge = 1;
+	rdma_wr.wr.next = NULL;
+
+	ret = ib_post_send(cb->qp, &rdma_wr.wr, &bad_wr);
+	if (unlikely(ret)) {
+		krdma_err("ib_post_send failed.\n");
+		return ret;
+	}
+	krdma_debug("ib_post_send succeed.\n");
+
+	ret = krdma_poll(cb, &imm, &len, true, KRDMA_READ);
+	if (unlikely(ret < 0)) {
+		krdma_err("krdma_poll failed with ret %d.\n", ret);
+		return ret;
+	}
+	krdma_debug("krdma_poll succeed.\n");
+
+	build_krdma_read_output(cb, buffer, length);
+	krdma_debug("krdma_read succeed with buffer = %s, length = %lu.\n", 
+		buffer, length);
+	return 0;
+}
+
+int krdma_write(struct krdma_cb *cb, const char *buffer, size_t length) {
+	struct ib_rdma_wr rdma_wr;
+	struct ib_send_wr *bad_wr = NULL;
+	struct ib_sge sge[1];
+	int ret;
+	imm_t imm = 666;
+	size_t len;
+
+	BUG_ON(!cb->read_write);
+
+	memset(sge, 0, sizeof(sge));
+	memset(&rdma_wr, 0, sizeof(rdma_wr));
+
+	sge[0].addr = cb->mr.rw_mr.local_info->addr;
+	sge[0].length = cb->mr.rw_mr.local_info->length;
+	sge[0].lkey = cb->pd->local_dma_lkey;
+
+	rdma_wr.remote_addr = (uintptr_t) cb->mr.rw_mr.remote_info->addr;
+	rdma_wr.rkey = cb->mr.rw_mr.remote_info->rkey;
+
+	rdma_wr.wr.sg_list = sge;
+	rdma_wr.wr.wr_id = 999;
+	rdma_wr.wr.ex.imm_data = imm;
+	rdma_wr.wr.opcode = IB_WR_RDMA_WRITE_WITH_IMM;
+	rdma_wr.wr.send_flags = IB_SEND_SIGNALED;
+	rdma_wr.wr.num_sge = 1;
+	rdma_wr.wr.next = NULL;
+
+	build_krdma_write_input(cb, buffer, length);
+
+	ret = ib_post_send(cb->qp, &rdma_wr.wr, &bad_wr);
+	if (unlikely(ret)) {
+		krdma_err("ib_post_send failed.\n");
+		return ret;
+	}
+	krdma_debug("ib_post_send succeed.\n");
+
+	ret = krdma_poll(cb, &imm, &len, true, KRDMA_WRITE);
+	if (unlikely(ret < 0)) {
+		krdma_err("krdma_poll failed with ret %d.\n", ret);
+		return ret;
+	}
+	krdma_debug("krdma_poll succeed.\n");
+
+	krdma_debug("krdma_write succeed with buffer = %s, length = %lu.\n", 
+		buffer, length);
+	return 0;
+}
+
+
 static int sr_client(void *data) {
 	struct krdma_cb *cb = NULL;
 	int ret = 0;
@@ -1154,6 +1627,7 @@ static int sr_client(void *data) {
 
 exit:
 	krdma_release_cb(cb);
+	__krdma_free_cb(cb);
 	return ret;
 }
 
@@ -1190,14 +1664,18 @@ static int sr_server(void *data) {
 
 free_accept_cb:
 	krdma_release_cb(accept_cb);
+	__krdma_free_cb(accept_cb);
 free_listen_cb:
 	krdma_release_cb(listen_cb);
+	__krdma_free_cb(listen_cb);
 	return ret;
 }
 
 static int rw_client(void *data) {
-	// struct krdma_cb *conn_cb = NULL;
+	// struct krdma_cb *cb = NULL;
 	int ret = 0;
+
+	// ret = krdma_rw_init_client("")
 	return ret;
 }
 
@@ -1226,8 +1704,8 @@ int __init krdma_init(void) {
 	};
 	int choice = server + 2 * rw;
 
-	printk(KERN_ERR "server %d\n", server);
-	printk(KERN_ERR "read/write %d\n", rw);
+	krdma_err("server %d\n", server);
+	krdma_err("read/write %d\n", rw);
 
 	thread = kthread_run(func[choice], NULL, name[choice]);
 	if (IS_ERR(thread)) {

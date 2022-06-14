@@ -30,18 +30,9 @@
 #include <linux/socket.h>
 #include <linux/slab.h>
 #include <linux/delay.h>
-#include <linux/kvm_host.h>
+// #include <linux/kvm_host.h>
 
 #include "ktcp.h"
-
-// struct tx_add {
-// 	uint32_t padding;
-// 	/*
-// 	 * (Hopefully) unique transcation id, which is used to eliminate the
-// 	 * necessity of per-socket locks.
-// 	 */
-// 	uint16_t txid;
-// };
 
 #define KTCP_RECV_BUF_SIZE 32
 
@@ -66,12 +57,12 @@ struct ktcp_cb
 
 #define KTCP_BUFFER_SIZE (sizeof(struct ktcp_hdr) + PAGE_SIZE)
 
-static int __ktcp_send(struct socket *sock, const char *buffer, size_t length,
-		unsigned long flags)
+static int __ktcp_send(struct socket *sock, const char *buffer, size_t length)
 {
 	struct kvec vec;
 	int len, written = 0, left = length;
 	int ret;
+	unsigned long flags = 0;
 
 	struct msghdr msg = {
 		.msg_name    = 0,
@@ -109,16 +100,16 @@ repeat_send:
 	return ret;
 }
 
-int ktcp_send(struct ktcp_cb *cb, const char *buffer, size_t length,
-		unsigned long flags, const tx_add_t *tx_add)
+int ktcp_send(struct ktcp_cb *cb, const char *buffer, size_t length)
 {
 	int ret;
 	mm_segment_t oldmm;
 	struct ktcp_hdr hdr;
 	char *local_buffer;
+	tx_add_t tx_add = { .txid = 0xFF };
 
 	mutex_lock(&cb->slock);
-	hdr.tx_add = *tx_add;
+	hdr.tx_add = tx_add;
 	hdr.length = sizeof(hdr) + length;
 
 	local_buffer = kzalloc(KTCP_BUFFER_SIZE, GFP_KERNEL);
@@ -132,7 +123,7 @@ int ktcp_send(struct ktcp_cb *cb, const char *buffer, size_t length,
 	// Get current address access limitdo
 	oldmm = get_fs();
 	set_fs(KERNEL_DS);
-	ret = __ktcp_send(cb->socket, local_buffer, sizeof(hdr) + length, flags);
+	ret = __ktcp_send(cb->socket, local_buffer, sizeof(hdr) + length);
 	
 	// Retrieve address access limit
 	set_fs(oldmm);
@@ -234,21 +225,22 @@ read_again:
 	return len;
 }
 
-int ktcp_receive(struct ktcp_cb *cb, char *buffer, unsigned long flags,
-		tx_add_t *tx_add)
+int ktcp_receive(struct ktcp_cb *cb, char *buffer)
 {
 	struct ktcp_hdr hdr;
 	int ret;
 	ktcp_msg_t msg;
 	uint32_t usec_sleep = 0;
 	char *local_buffer;
+	tx_add_t tx_add = { .txid = 0xFF };
+	unsigned long flags = 0;
 
-	BUG_ON(cb == NULL || buffer == NULL || tx_add == NULL);
+	BUG_ON(cb == NULL || buffer == NULL);
 
 	mutex_lock(&cb->rlock);
 repoll:
-	if (search_recv_buf(cb, tx_add->txid, &msg)){
-		ret = build_ktcp_recv_output(msg, buffer, tx_add);
+	if (search_recv_buf(cb, 0xFF, &msg)){
+		ret = build_ktcp_recv_output(msg, buffer, &tx_add);
 		mutex_unlock(&cb->rlock);
 		return ret;
 	}
@@ -276,7 +268,7 @@ repoll:
 	memcpy(&hdr, local_buffer, sizeof(hdr));
 	msg.recv_buf = local_buffer;
 	msg.txid = hdr.tx_add.txid;
-	if (hdr.tx_add.txid != tx_add->txid && tx_add->txid != 0xFF){
+	if (hdr.tx_add.txid != tx_add.txid && tx_add.txid != 0xFF){
 		while(!insert_into_recv_buf(cb, msg)){
 			mutex_unlock(&cb->rlock);
 			usec_sleep = (usec_sleep + 1) > 1000 ? 1000 : (usec_sleep + 1);
@@ -287,7 +279,7 @@ repoll:
 		goto repoll;
 	}
 	else{
-		build_ktcp_recv_output(msg, buffer, tx_add);
+		build_ktcp_recv_output(msg, buffer, &tx_add);
 	}
 out:
 	mutex_unlock(&cb->rlock);
@@ -406,11 +398,12 @@ int ktcp_listen(const char *host, const char *port, struct ktcp_cb **listen_cb)
 	return SUCCESS;
 }
 
-int ktcp_accept(struct ktcp_cb *listen_cb, struct ktcp_cb **accept_cb, unsigned long flag)
+int ktcp_accept(struct ktcp_cb *listen_cb, struct ktcp_cb **accept_cb)
 {
 	int ret;
 	struct ktcp_cb *cb;
 	struct socket *listen_socket, *accept_socket;
+	unsigned long flag = 0;
 
 	if (listen_cb == NULL || (listen_socket = listen_cb->socket) == NULL) {
 		printk(KERN_ERR "%s: null listen_cb\n", __func__);
